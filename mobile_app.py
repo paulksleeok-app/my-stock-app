@@ -1,4 +1,9 @@
-"""휴대폰 전용 경량 대시보드 — app.py 핵심 로직 재사용, 차트 없음."""
+"""휴대폰·브라우저 전용 경량 요약.
+
+차트 없이 숫자·문구만 표시해 데이터·렌더 비용을 줄였습니다. Streamlit Cloud 등
+배포 URL만 있으면 Wi-Fi/셀룰러 등 인터넷 되는 곳 어디서나 같은 화면을 볼 수 있습니다.
+로컬 PC 전용이 아닙니다 — `streamlit run mobile_app.py` 는 개발용입니다.
+"""
 
 from __future__ import annotations
 
@@ -42,6 +47,11 @@ def main() -> None:
         page_title="주식 요약 (모바일)",
         layout="centered",
         initial_sidebar_state="collapsed",
+        menu_items={
+            "Get Help": None,
+            "Report a bug": None,
+            "About": None,
+        },
     )
     import app as core
 
@@ -51,10 +61,18 @@ def main() -> None:
         st.markdown(
             """
 <style>
-  .block-container { padding-top: 0.75rem !important; max-width: 560px !important; }
+  html { -webkit-text-size-adjust: 100%; }
+  .block-container {
+    padding-top: max(0.75rem, env(safe-area-inset-top)) !important;
+    padding-left: max(0.75rem, env(safe-area-inset-left)) !important;
+    padding-right: max(0.75rem, env(safe-area-inset-right)) !important;
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom)) !important;
+    max-width: min(560px, 100%) !important;
+  }
   h1 { font-size: 1.25rem !important; margin-bottom: 0.35rem !important; }
   h2, h3 { font-size: 1.05rem !important; }
   [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+  button[kind="header"] { min-height: 44px; }
   .mobile-section {
     background: #f6f8fa;
     border: 1px solid #e1e4e8;
@@ -72,6 +90,10 @@ def main() -> None:
         )
 
     st.title("📱 미국 주식 · 요약")
+    st.caption(
+        "인터넷만 연결된 브라우저에서 열면 됩니다. "
+        "배포 주소(Streamlit Cloud 등)를 즐겨찾기해 두면 어디서든 동일하게 볼 수 있어요."
+    )
 
     holdings = list(core.PORTFOLIO_HOLDINGS.keys())
     default_t = holdings[0] if holdings else "AAPL"
@@ -86,12 +108,12 @@ def main() -> None:
 
         m_last = _market_last_us_date()
         days_back = st.slider(
-            "조회 일수 (짧을수록 빠름)",
+            "조회 일수 (짧을수록 빠름·데이터 적음)",
             min_value=60,
             max_value=365,
-            value=120,
+            value=90,
             step=10,
-            help="이동평균·지표에 필요한 최소 구간을 넘기만 하면 됩니다. 짧게 할수록 로딩이 빨라집니다.",
+            help="이평·지표에 필요한 최소 길이만 넘기면 됩니다. 짧을수록 네트워크·계산이 가벼워집니다.",
         )
         short_w = st.number_input("단기 이평", 3, 120, 20)
         long_w = st.number_input("장기 이평", 10, 365, 60)
