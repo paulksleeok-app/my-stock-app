@@ -41,7 +41,7 @@ def main() -> None:
     st.set_page_config(
         page_title="주식 요약 (모바일)",
         layout="centered",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="collapsed",
     )
     import app as core
 
@@ -97,11 +97,7 @@ def main() -> None:
         long_w = st.number_input("장기 이평", 10, 365, 60)
         if short_w >= long_w:
             st.warning("단기 이평은 장기보다 작아야 합니다.")
-        run = st.button("불러오기", type="primary", use_container_width=True)
-
-    if not run:
-        st.info("왼쪽 사이드바에서 티커를 고른 뒤 **불러오기**를 눌러주세요.")
-        return
+        st.caption("티커·기간·이평을 바꾸면 자동으로 다시 계산됩니다.")
 
     if short_w >= long_w:
         st.error("단기 이평 < 장기 이평으로 맞춰주세요.")
