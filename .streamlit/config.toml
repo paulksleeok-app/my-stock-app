@@ -1,0 +1,6 @@
+server.address = "0.0.0.0"
+server.port = 8501
+
+# If you want to share outside your LAN, do NOT expose this port directly.
+# Prefer a tunnel (e.g., Cloudflare Tunnel) or a reverse proxy with auth.
+
