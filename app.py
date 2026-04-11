@@ -1,16 +1,16 @@
+from __future__ import annotations
+
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 import io
 import math
-from plotly.subplots import make_subplots
 
 import requests
-import yfinance as yf
 
 
 def _normalize_ohlc_df(data: pd.DataFrame) -> pd.DataFrame | None:
@@ -30,6 +30,8 @@ def _normalize_ohlc_df(data: pd.DataFrame) -> pd.DataFrame | None:
 
 
 def _load_yfinance(ticker: str, start: dt.date, end: dt.date) -> Tuple[pd.DataFrame, str | None]:
+    import yfinance as yf
+
     try:
         raw = yf.download(
             ticker,
@@ -58,7 +60,7 @@ def _load_stooq_csv(ticker: str, start: dt.date, end: dt.date) -> Tuple[pd.DataF
     try:
         resp = requests.get(
             url,
-            timeout=25,
+            timeout=18,
             headers={"User-Agent": "stock-app/1.0", "Accept": "text/csv"},
         )
         resp.raise_for_status()
@@ -91,12 +93,12 @@ def _load_stooq_csv(ticker: str, start: dt.date, end: dt.date) -> Tuple[pd.DataF
     return out, None
 
 
-def load_price_data(
+def _load_price_data_impl(
     ticker: str,
     start: dt.date,
     end: dt.date,
 ) -> Tuple[pd.DataFrame, str | None]:
-    """지정 기간 일봉: yfinance 우선, 실패·빈 데이터 시 Stooq CSV 폴백."""
+    """지정 기간 일봉: yfinance 우선, 실패·빈 데이터 시 Stooq CSV 폴백 (캐시·스레드용 코어)."""
     msgs: list[str] = []
 
     df_yf, err_yf = _load_yfinance(ticker, start, end)
@@ -116,6 +118,36 @@ def load_price_data(
         pd.DataFrame(),
         f"{ticker} 데이터를 가져오지 못했습니다.\n{detail}",
     )
+
+
+@st.cache_data(ttl=600, max_entries=256, show_spinner=False)
+def _load_price_data_cached(ticker: str, start_iso: str, end_iso: str) -> tuple:
+    """메인 분석 티커용 캐시(동일 티커·기간 재조회 시 네트워크 생략)."""
+    s = dt.date.fromisoformat(start_iso)
+    e = dt.date.fromisoformat(end_iso)
+    df, err = _load_price_data_impl(ticker, s, e)
+    if df is None or df.empty:
+        return df, err
+    return df.copy(), err
+
+
+def load_price_data(
+    ticker: str,
+    start: dt.date,
+    end: dt.date,
+) -> Tuple[pd.DataFrame, str | None]:
+    """일봉 로드(캐시). 포트폴리오 병렬 로드는 `load_price_data_parallel` 사용."""
+    t = ticker.strip().upper()
+    return _load_price_data_cached(t, start.isoformat(), end.isoformat())
+
+
+def load_price_data_parallel(
+    ticker: str,
+    start: dt.date,
+    end: dt.date,
+) -> Tuple[pd.DataFrame, str | None]:
+    """스레드·다종목용(캐시 비적용 — Streamlit 캐시는 메인 스레드 전용)."""
+    return _load_price_data_impl(ticker.strip().upper(), start, end)
 
 
 def add_moving_averages(
@@ -224,71 +256,72 @@ def _weighted_linear_regression(x, y, weights) -> tuple[float, float]:
     return float(beta[0]), float(beta[1])
 
 
-def _log_price_forecast_weighted_atr(
-    df: pd.DataFrame,
-    days_ahead: int,
-    lookback_days: int = 20,
-    *,
-    z_score: float = 1.96,
-) -> tuple[str, str, dict]:
-    """로그 종가에 대해 최근일 가중(WMA 스타일) 선형 추세 + ATR·로그변동성 혼합 불확실성 구간.
-
-    - 가중치: 지수적 최근 강조 + 최근 5거래일·3거래일 추가 배율
-    - 구간: 최근 로그수익률 σ와 ATR%(종가 대비)를 거래일 수로 스케일해 합성(변동성 클수록 폭 확대)
-    """
+def _forecast_precompute(df: pd.DataFrame, lookback_days: int = 20) -> dict | None:
+    """WLS 로그추세·변동성 성분 1회 계산(다중 예측일 재사용)."""
     import numpy as np
 
-    if days_ahead <= 0:
-        return "예측 불가", "days_ahead는 1 이상이어야 합니다.", {}
-
     if df is None or df.empty:
-        return "예측 불가", "데이터가 없습니다.", {}
-
+        return None
     closes = df["close"].dropna()
     if closes.shape[0] < 10:
-        return "예측 불가", "데이터가 부족해 가격 예측 범위를 계산할 수 없습니다.", {}
-
+        return None
     closes = closes.tail(int(lookback_days))
     if closes.shape[0] < 10:
-        return "예측 불가", "최근 데이터가 부족해 가격 예측 범위를 계산할 수 없습니다.", {}
+        return None
 
-    atr_series = None
-    if "atr" in df.columns:
-        atr_series = df["atr"].reindex(closes.index)
-
+    atr_series = df["atr"].reindex(closes.index) if "atr" in df.columns else None
     y = np.log(np.asarray(closes.values, dtype=float))
     n = len(y)
     x = np.arange(n, dtype=float)
-
-    # WMA 스타일: 최근일일수록 큰 가중(지수) + 최근 5일·3일 추가 부스트
     w = np.exp(2.2 * x / max(n - 1, 1.0))
     if n >= 5:
         w[-5:] *= 1.85
     if n >= 3:
         w[-3:] *= 1.25
     w = w * (n / np.sum(w))
-
     slope, intercept = _weighted_linear_regression(x, y, w)
-
-    future_x = n - 1 + int(days_ahead)
-    future_log_price = slope * future_x + intercept
-    future_price = float(np.exp(future_log_price))
-
     log_ret = np.diff(y)
     vol_log = float(log_ret.std()) if log_ret.size > 0 else 0.0
-    sigma_path = vol_log * float(np.sqrt(days_ahead))
-
     last_close = float(closes.iloc[-1])
     last_atr = atr_series.iloc[-1] if atr_series is not None else pd.NA
     atr_pct = float(last_atr) / last_close if pd.notna(last_atr) and last_close > 0 else 0.0
-    sigma_atr = atr_pct * float(np.sqrt(days_ahead))
-
     atr_ratio = 1.0
     if atr_series is not None and atr_series.dropna().shape[0] >= 20:
         atr_ma = float(atr_series.tail(20).mean())
         if atr_ma > 0 and pd.notna(last_atr):
             atr_ratio = float(last_atr) / atr_ma
+    return {
+        "n": n,
+        "slope": slope,
+        "intercept": intercept,
+        "vol_log": vol_log,
+        "atr_pct": atr_pct,
+        "atr_ratio": atr_ratio,
+    }
 
+
+def _forecast_at_horizon(
+    pre: dict,
+    days_ahead: int,
+    *,
+    z_score: float = 1.96,
+) -> tuple[str, str, dict]:
+    import numpy as np
+
+    if days_ahead <= 0:
+        return "예측 불가", "days_ahead는 1 이상이어야 합니다.", {}
+    n = int(pre["n"])
+    slope = float(pre["slope"])
+    intercept = float(pre["intercept"])
+    vol_log = float(pre["vol_log"])
+    atr_pct = float(pre["atr_pct"])
+    atr_ratio = float(pre["atr_ratio"])
+
+    future_x = n - 1 + int(days_ahead)
+    future_log_price = slope * future_x + intercept
+    future_price = float(np.exp(future_log_price))
+    sigma_path = vol_log * float(np.sqrt(days_ahead))
+    sigma_atr = atr_pct * float(np.sqrt(days_ahead))
     sigma_combined = float(np.hypot(sigma_path, sigma_atr * 0.95))
     if atr_ratio > 1.0:
         sigma_combined *= float(1.0 + 0.35 * min(atr_ratio - 1.0, 2.0))
@@ -315,6 +348,38 @@ def _log_price_forecast_weighted_atr(
         "slope_log_per_day": slope,
     }
     return label, detail, meta
+
+
+def multi_horizon_price_labels(
+    df: pd.DataFrame,
+    horizons: tuple[int, ...] = (1, 2, 3, 5, 10),
+    lookback_days: int = 20,
+) -> dict[int, str]:
+    """여러 거래일 예측 라벨을 회귀 1회로 계산."""
+    pre = _forecast_precompute(df, lookback_days)
+    if pre is None:
+        return {h: "예측 불가" for h in horizons}
+    out: dict[int, str] = {}
+    for h in horizons:
+        lab, _, _ = _forecast_at_horizon(pre, h, z_score=1.96)
+        out[h] = lab
+    return out
+
+
+def _log_price_forecast_weighted_atr(
+    df: pd.DataFrame,
+    days_ahead: int,
+    lookback_days: int = 20,
+    *,
+    z_score: float = 1.96,
+) -> tuple[str, str, dict]:
+    """로그 종가에 대해 최근일 가중(WMA 스타일) 선형 추세 + ATR·로그변동성 혼합 불확실성 구간."""
+    if days_ahead <= 0:
+        return "예측 불가", "days_ahead는 1 이상이어야 합니다.", {}
+    pre = _forecast_precompute(df, lookback_days)
+    if pre is None:
+        return "예측 불가", "데이터가 부족해 가격 예측 범위를 계산할 수 없습니다.", {}
+    return _forecast_at_horizon(pre, days_ahead, z_score=z_score)
 
 
 def compute_atr_risk_levels(
@@ -882,66 +947,78 @@ PORTFOLIO_HOLDINGS: dict[str, int] = {
 }
 
 
+def _portfolio_row_for_ticker(tkr: str, qty: int, as_of: dt.date) -> dict | None:
+    """단일 보유 종목 행(병렬 워커용 — 네트워크는 load_price_data_parallel)."""
+    start = as_of - dt.timedelta(days=180)
+    df, _ = load_price_data_parallel(tkr, start, as_of)
+    if df.empty:
+        return None
+
+    today_change_pct = pd.NA
+    prev_close = pd.NA
+    closes = df["close"].dropna()
+    if closes.shape[0] >= 2:
+        prev_close = float(closes.iloc[-2])
+        last_close = float(closes.iloc[-1])
+        if prev_close != 0:
+            today_change_pct = (last_close / prev_close - 1) * 100
+
+    df = calculate_cross_signals(df, 20, 60)
+    df = add_institutional_indicators(df)
+    headline, details = institutional_signal_summary(
+        df, 20, 60, volume_filter=True, atr_stop_mult=2.0, atr_take_mult=3.0
+    )
+    last = df.iloc[-1]
+    close = float(last["close"])
+    value_usd = close * qty
+    prev_value_usd = float(prev_close) * qty if pd.notna(prev_close) else pd.NA
+
+    latest_cross_text, latest_cross_date = get_latest_signal(df)
+
+    sl = details.get("stop_loss")
+    tp = details.get("take_profit")
+    fac = details.get("factors") or {}
+
+    return {
+        "티커": tkr,
+        "보유수량": qty,
+        "현재가(USD)": round(close, 2),
+        "오늘변동(%)": round(float(today_change_pct), 2) if pd.notna(today_change_pct) else "",
+        "평가금액(USD)": int(round(value_usd)) if pd.notna(value_usd) else "",
+        "_전일평가금액(USD)": round(float(prev_value_usd), 2) if pd.notna(prev_value_usd) else "",
+        "멀티팩터(0~100)": details.get("composite_100", ""),
+        "추세": fac.get("trend", ""),
+        "모멘텀": fac.get("momentum", ""),
+        "변동성": fac.get("volatility", ""),
+        "거래량점수": fac.get("volume", ""),
+        "거래량신호": details.get("volume_quality", ""),
+        "손절가(ATR)": round(float(sl), 2) if pd.notna(sl) else "",
+        "목표가(ATR)": round(float(tp), 2) if pd.notna(tp) else "",
+        "한줄 의사결정": details.get("action", ""),
+        "퀀트판단": headline,
+        "최근 크로스/매매 의견": latest_cross_text,
+        "최근 크로스 일자": latest_cross_date.strftime("%Y-%m-%d")
+        if latest_cross_date is not None
+        else "",
+    }
+
+
 def build_portfolio_snapshot(as_of: dt.date) -> pd.DataFrame:
-    """보유 종목 기준으로 기관식 판단/가격/가치 요약 테이블 생성."""
+    """보유 종목 기준 요약(티커별 네트워크 병렬)."""
+    items = list(PORTFOLIO_HOLDINGS.items())
     rows: list[dict] = []
-
-    for tkr, qty in PORTFOLIO_HOLDINGS.items():
-        start = as_of - dt.timedelta(days=180)
-        df, _ = load_price_data(tkr, start, as_of)
-        if df.empty:
-            continue
-
-        # 오늘(=최근 거래일) 변동률: 직전 거래일 대비 종가 기준
-        today_change_pct = pd.NA
-        prev_close = pd.NA
-        closes = df["close"].dropna()
-        if closes.shape[0] >= 2:
-            prev_close = float(closes.iloc[-2])
-            last_close = float(closes.iloc[-1])
-            if prev_close != 0:
-                today_change_pct = (last_close / prev_close - 1) * 100
-
-        df = calculate_cross_signals(df, 20, 60)
-        df = add_institutional_indicators(df)
-        headline, details = institutional_signal_summary(
-            df, 20, 60, volume_filter=True, atr_stop_mult=2.0, atr_take_mult=3.0
-        )
-        last = df.iloc[-1]
-        close = float(last["close"])
-        value_usd = close * qty
-        prev_value_usd = float(prev_close) * qty if pd.notna(prev_close) else pd.NA
-
-        latest_cross_text, latest_cross_date = get_latest_signal(df)
-
-        sl = details.get("stop_loss")
-        tp = details.get("take_profit")
-        fac = details.get("factors") or {}
-
-        rows.append(
-            {
-                "티커": tkr,
-                "보유수량": qty,
-                "현재가(USD)": round(close, 2),
-                "오늘변동(%)": round(float(today_change_pct), 2) if pd.notna(today_change_pct) else "",
-                "평가금액(USD)": int(round(value_usd)) if pd.notna(value_usd) else "",
-                "_전일평가금액(USD)": round(float(prev_value_usd), 2) if pd.notna(prev_value_usd) else "",
-                "멀티팩터(0~100)": details.get("composite_100", ""),
-                "추세": fac.get("trend", ""),
-                "모멘텀": fac.get("momentum", ""),
-                "변동성": fac.get("volatility", ""),
-                "거래량점수": fac.get("volume", ""),
-                "거래량신호": details.get("volume_quality", ""),
-                "손절가(ATR)": round(float(sl), 2) if pd.notna(sl) else "",
-                "목표가(ATR)": round(float(tp), 2) if pd.notna(tp) else "",
-                "한줄 의사결정": details.get("action", ""),
-                "퀀트판단": headline,
-                "최근 크로스/매매 의견": latest_cross_text,
-                "최근 크로스 일자": latest_cross_date.strftime("%Y-%m-%d")
-                if latest_cross_date is not None
-                else "",
-            }
-        )
+    if not items:
+        return pd.DataFrame()
+    max_w = min(6, len(items))
+    with ThreadPoolExecutor(max_workers=max_w) as ex:
+        futures = {ex.submit(_portfolio_row_for_ticker, t, q, as_of): t for t, q in items}
+        for fut in as_completed(futures):
+            try:
+                r = fut.result()
+                if r:
+                    rows.append(r)
+            except Exception:
+                continue
 
     if not rows:
         return pd.DataFrame()
@@ -1095,7 +1172,9 @@ def plot_price_and_ma(
     ticker: str,
     short_window: int,
     long_window: int,
-) -> go.Figure:
+):
+    import plotly.graph_objects as go
+
     short_col = f"ma_{short_window}"
     long_col = f"ma_{long_window}"
 
@@ -1336,8 +1415,11 @@ def plot_price_ma_ichimoku_rsi(
     short_window: int,
     long_window: int,
     mid_window: int | None = None,
-) -> go.Figure:
+):
     """상단: 캔들 + 단·중·장 이평 + 일목 구름만(전환/기준선·크로스 마커 제거) / MACD / RSI."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
     d = add_ichimoku_columns(df)
     short_col = f"ma_{short_window}"
     long_col = f"ma_{long_window}"
@@ -1533,10 +1615,12 @@ def plot_price_ma_ichimoku_rsi(
 def main() -> None:
     st.set_page_config(page_title="미국 주식 매매타이밍 대시보드", layout="wide")
 
-    # 화면에 더 많이 보이도록: 전체 글씨 크기 통일 + 여백 축소
+    # 화면에 더 많이 보이도록: 전체 글씨 크기 통일 + 여백 축소 (세션당 1회만 주입)
     base_font_px = 14
-    st.markdown(
-        f"""
+    if st.session_state.get("_stockapp_css_done") is not True:
+        st.session_state["_stockapp_css_done"] = True
+        st.markdown(
+            f"""
 <style>
 /* Reduce overall paddings/margins */
 div.block-container {{
@@ -1605,8 +1689,8 @@ div[data-testid="stVerticalBlock"] > div {{
 }}
 </style>
 """,
-        unsafe_allow_html=True,
-    )
+            unsafe_allow_html=True,
+        )
 
     st.title("📈 미국 주식 매매타이밍 대시보드")
 
@@ -1676,6 +1760,12 @@ div[data-testid="stVerticalBlock"] > div {{
 
         if not (short_window < mid_window < long_window):
             st.warning("이동평균은 단기 < 중기 < 장기 순이어야 합니다.")
+
+        load_portfolio = st.checkbox(
+            "포트폴리오 요약 로드 (보유 다종목·네트워크 병렬)",
+            value=False,
+            help="끄면 메인 분석만 실행되어 Streamlit Cloud에서 훨씬 빠릅니다.",
+        )
 
         run = st.button("분석하기")
 
@@ -1771,13 +1861,14 @@ div[data-testid="stVerticalBlock"] > div {{
     with st.expander("크로스 상세 설명 보기"):
         st.write(cross_proj_detail)
 
-    # 분석 티커 가격 요약 (현재가/1/2/3/5/2주(10거래일) 예상)
+    # 분석 티커 가격 요약 (현재가/1/2/3/5/2주(10거래일) 예상) — 회귀 1회
     last_close = float(df["close"].dropna().iloc[-1]) if not df["close"].dropna().empty else pd.NA
-    proj1_label, _, _ = price_projection(df, days_ahead=1)
-    proj2_label, _, _ = price_projection(df, days_ahead=2)
-    proj3_label, _, _ = price_projection(df, days_ahead=3)
-    proj5_label, _, _ = price_projection(df, days_ahead=5)
-    proj10_label, _, _ = price_projection(df, days_ahead=10)
+    _mh = multi_horizon_price_labels(df, (1, 2, 3, 5, 10))
+    proj1_label = _mh.get(1, "예측 불가")
+    proj2_label = _mh.get(2, "예측 불가")
+    proj3_label = _mh.get(3, "예측 불가")
+    proj5_label = _mh.get(5, "예측 불가")
+    proj10_label = _mh.get(10, "예측 불가")
 
     st.subheader("가격 요약 (참고용)")
     col_px1, col_px2, col_px3 = st.columns(3)
@@ -1829,35 +1920,36 @@ div[data-testid="stVerticalBlock"] > div {{
         with st.expander("멀티팩터 근거(항목별)", expanded=False):
             st.write("\n".join([f"- {r}" for r in reasons]))
 
-    # 내 포트폴리오 요약 (멀티팩터·ATR·거래량)
-    st.subheader("내 포트폴리오 (멀티팩터 · 거래량 · ATR 손절/목표)")
-    snap = build_portfolio_snapshot(as_of=end_date)
-    if snap.empty:
-        st.info("포트폴리오 요약을 계산할 수 없습니다. 데이터 소스 또는 티커를 확인해주세요.")
-    else:
-        total_usd = float(pd.to_numeric(snap["평가금액(USD)"], errors="coerce").fillna(0).sum())
-        prev_total_raw = snap.get("_전일평가금액(USD)")
-        prev_total_usd = pd.NA
-        if prev_total_raw is not None:
-            prev_total_series = pd.to_numeric(prev_total_raw, errors="coerce")
-            if prev_total_series.notna().any():
-                prev_total_usd = float(prev_total_series.fillna(0).sum())
-
-        if pd.notna(prev_total_usd) and float(prev_total_usd) > 0:
-            delta_usd = total_usd - float(prev_total_usd)
-            delta_pct = delta_usd / float(prev_total_usd) * 100
-            st.metric(
-                "포트폴리오 총 평가금액(USD 기준)",
-                f"{total_usd:,.0f}",
-                delta=f"{delta_usd:,.0f} USD ({delta_pct:+.2f}%)",
-            )
+    # 내 포트폴리오 (선택 시에만 — 다종목 네트워크 부하)
+    if load_portfolio:
+        st.subheader("내 포트폴리오 (멀티팩터 · 거래량 · ATR 손절/목표)")
+        with st.spinner("포트폴리오 종목 데이터를 불러오는 중..."):
+            snap = build_portfolio_snapshot(as_of=end_date)
+        if snap.empty:
+            st.info("포트폴리오 요약을 계산할 수 없습니다. 데이터 소스 또는 티커를 확인해주세요.")
         else:
-            st.metric("포트폴리오 총 평가금액(USD 기준)", f"{total_usd:,.0f}")
+            total_usd = float(pd.to_numeric(snap["평가금액(USD)"], errors="coerce").fillna(0).sum())
+            prev_total_raw = snap.get("_전일평가금액(USD)")
+            prev_total_usd = pd.NA
+            if prev_total_raw is not None:
+                prev_total_series = pd.to_numeric(prev_total_raw, errors="coerce")
+                if prev_total_series.notna().any():
+                    prev_total_usd = float(prev_total_series.fillna(0).sum())
 
-        # 화면에 표 1개만: 상세 항목만 표시
-        snap_no_hidden = snap.drop(columns=["_전일평가금액(USD)"], errors="ignore")
-        with st.expander("포트폴리오 상세 항목 보기", expanded=True):
-            st.dataframe(snap_no_hidden, use_container_width=True, hide_index=True)
+            if pd.notna(prev_total_usd) and float(prev_total_usd) > 0:
+                delta_usd = total_usd - float(prev_total_usd)
+                delta_pct = delta_usd / float(prev_total_usd) * 100
+                st.metric(
+                    "포트폴리오 총 평가금액(USD 기준)",
+                    f"{total_usd:,.0f}",
+                    delta=f"{delta_usd:,.0f} USD ({delta_pct:+.2f}%)",
+                )
+            else:
+                st.metric("포트폴리오 총 평가금액(USD 기준)", f"{total_usd:,.0f}")
+
+            snap_no_hidden = snap.drop(columns=["_전일평가금액(USD)"], errors="ignore")
+            with st.expander("포트폴리오 상세 항목 보기", expanded=True):
+                st.dataframe(snap_no_hidden, use_container_width=True, hide_index=True)
 
     st.subheader("룰 기반 백테스트(단순)")
     bt = backtest_ma_atr_strategy(
@@ -1870,6 +1962,8 @@ div[data-testid="stVerticalBlock"] > div {{
     )
     perf = performance_summary(bt["equity_curve"])
     if perf:
+        import plotly.graph_objects as go
+
         col_p1, col_p2, col_p3, col_p4 = st.columns(4)
         with col_p1:
             st.metric("총 수익률", f"{perf['total_return']*100:.1f}%")
