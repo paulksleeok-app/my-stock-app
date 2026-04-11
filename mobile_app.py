@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import html
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
-
-import app as core
 
 
 def _market_last_us_date() -> dt.date:
@@ -38,11 +37,13 @@ def _fmt_num(x, *, digits: int = 2) -> str:
 
 
 def main() -> None:
+    # 반드시 첫 Streamlit 호출이어야 함. app은 이후에 지연 import (캐시·무거운 모듈 로드 분리).
     st.set_page_config(
         page_title="주식 요약 (모바일)",
         layout="centered",
         initial_sidebar_state="expanded",
     )
+    import app as core
 
     # 터치·가독성 + 불필요한 리소스 최소화 (차트 라이브러리 미사용)
     if st.session_state.get("_mobile_css") is not True:
@@ -144,8 +145,9 @@ def main() -> None:
 
     # —— 기관형 수급(거래량·정합) —— #
     st.subheader("기관 수급 정보")
-    vq = str(inst.get("volume_quality") or "—")
-    v_score = fac.get("volume", "")
+    vq = html.escape(str(inst.get("volume_quality") or "—"))
+    v_score = html.escape(str(fac.get("volume", "")))
+    vol_safe = html.escape(str(vol_label))
     st.markdown(
         f'<div class="mobile-section">'
         f'<div class="mobile-row"><span class="mobile-k">거래량 신호</span> '
@@ -153,7 +155,7 @@ def main() -> None:
         f'<div class="mobile-row"><span class="mobile-k">수급 팩터 (−1~1)</span> '
         f'<span class="mobile-v">{v_score}</span></div>'
         f'<div class="mobile-row"><span class="mobile-k">거래량 추이 요약</span> '
-        f'<span class="mobile-v">{vol_label}</span></div>'
+        f'<span class="mobile-v">{vol_safe}</span></div>'
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -210,7 +212,7 @@ def main() -> None:
         f'<div class="mobile-row"><span class="mobile-k">손익비 (R)</span> '
         f'<span class="mobile-v">{_fmt_num(rr, digits=2)}</span></div>'
         f'<div class="mobile-row"><span class="mobile-k">한줄 의사결정</span> '
-        f'<span class="mobile-v">{inst.get("action", "—")}</span></div>'
+        f'<span class="mobile-v">{html.escape(str(inst.get("action", "—")))}</span></div>'
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -219,5 +221,5 @@ def main() -> None:
     st.caption(f"기간: {start_d} ~ {end_d} · 이평 {short_w}/{long_w}")
 
 
-if __name__ == "__main__":
-    main()
+# Streamlit Cloud는 스크립트를 엔트리포인트로 실행합니다. __name__ 가드 없이 호출해 항상 부팅되게 합니다.
+main()
