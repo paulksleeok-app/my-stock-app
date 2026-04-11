@@ -75,7 +75,7 @@ def _load_stooq_csv(ticker: str, start: dt.date, end: dt.date) -> Tuple[pd.DataF
     raw = raw.copy()
     raw["Date"] = pd.to_datetime(raw["Date"], errors="coerce")
     raw = raw.dropna(subset=["Date"]).set_index("Date").sort_index()
-    raw = raw.loc[pd.Timestamp(start) : pd.Timestamp(end)]
+    raw = raw.loc[pd.Timestamp(start):pd.Timestamp(end)]
     if raw.empty:
         return pd.DataFrame(), "선택 기간에 Stooq 데이터 없음"
 
@@ -1040,7 +1040,6 @@ def calculate_cross_signals(
     long_col = f"ma_{long_window}"
 
     # 신호 기준: 단기 > 장기 (1), 단기 < 장기 (-1)
-    signal = 0
     df["signal"] = 0
     df.loc[df[short_col] > df[long_col], "signal"] = 1
     df.loc[df[short_col] < df[long_col], "signal"] = -1
