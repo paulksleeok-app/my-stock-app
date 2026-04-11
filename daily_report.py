@@ -21,7 +21,7 @@ def build_portfolio_daily_report(as_of: dt.date) -> str:
         lines.append("포트폴리오 요약을 계산할 수 없습니다. (데이터 소스/티커 확인 필요)")
         return "\n".join(lines)
 
-    total_usd = float(snap["평가금액(USD)"].sum())
+    total_usd = float(pd.to_numeric(snap["평가금액(USD)"], errors="coerce").fillna(0).sum())
     lines.append(f"- 포트폴리오 총 평가금액(USD): {total_usd:,.2f}")
     lines.append("")
 

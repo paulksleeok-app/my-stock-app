@@ -707,7 +707,7 @@ def backtest_ma_atr_strategy(
         trend = row.get("trend_long")
 
         if pd.isna(price):
-            curve.append((idx, equity, pos, entry, stop, take, pd.NA))
+            curve.append((idx, equity, pos, entry, stop, take, 0, pd.NA))
             continue
 
         trade = 0  # +1 buy, -1 sell
