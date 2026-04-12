@@ -6,3 +6,4 @@ venv/
 .env
 *.log
 .streamlit/secrets.toml
+portfolio_holdings.json

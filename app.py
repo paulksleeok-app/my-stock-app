@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import threading
+from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Tuple
 from zoneinfo import ZoneInfo
 
@@ -11,6 +15,9 @@ import io
 import math
 
 import requests
+
+# yfinance·HTTP는 동시 호출 시 간헐 예외가 나기 쉬워 직렬화
+_price_fetch_lock = threading.Lock()
 
 
 def _normalize_ohlc_df(data: pd.DataFrame) -> pd.DataFrame | None:
@@ -101,23 +108,69 @@ def _load_price_data_impl(
     """지정 기간 일봉: yfinance 우선, 실패·빈 데이터 시 Stooq CSV 폴백 (캐시·스레드용 코어)."""
     msgs: list[str] = []
 
-    df_yf, err_yf = _load_yfinance(ticker, start, end)
-    if not df_yf.empty:
-        return df_yf, None
-    if err_yf:
-        msgs.append(f"yfinance: {err_yf}")
+    with _price_fetch_lock:
+        df_yf, err_yf = _load_yfinance(ticker, start, end)
+        if not df_yf.empty:
+            return df_yf, None
+        if err_yf:
+            msgs.append(f"yfinance: {err_yf}")
 
-    df_s, err_s = _load_stooq_csv(ticker, start, end)
-    if not df_s.empty:
-        return df_s, None
-    if err_s:
-        msgs.append(f"Stooq: {err_s}")
+        df_s, err_s = _load_stooq_csv(ticker, start, end)
+        if not df_s.empty:
+            return df_s, None
+        if err_s:
+            msgs.append(f"Stooq: {err_s}")
 
     detail = "\n".join(msgs) if msgs else "알 수 없음"
     return (
         pd.DataFrame(),
         f"{ticker} 데이터를 가져오지 못했습니다.\n{detail}",
     )
+
+
+def last_valid_close_snapshot(
+    df: pd.DataFrame,
+) -> tuple[pd.Series | None, float | None, float | None]:
+    """가장 최근의 유효한 종가 행과 가격(전일 종가 포함).
+
+    장중·미완성 봉 등으로 마지막 행의 close가 NaN인 경우, 직전 확정 종가를 사용한다.
+    """
+    if df is None or df.empty or "close" not in df.columns:
+        return None, None, None
+    s = pd.to_numeric(df["close"], errors="coerce").dropna()
+    if s.empty:
+        return None, None, None
+    row = df.loc[s.index[-1]]
+    last = float(s.iloc[-1])
+    prev = float(s.iloc[-2]) if len(s) >= 2 else None
+    return row, last, prev
+
+
+def trim_df_to_last_valid_close(df: pd.DataFrame) -> pd.DataFrame:
+    """미확정(종가 NaN) 말단 행을 제거해 분석 시 마지막 행에 항상 유효 종가가 오게 함."""
+    if df.empty or "close" not in df.columns:
+        return df
+    mask = pd.to_numeric(df["close"], errors="coerce").notna()
+    if not mask.any():
+        return df.iloc[0:0].copy()
+    pos = int(mask.to_numpy().nonzero()[0][-1])
+    return df.iloc[: pos + 1].copy()
+
+
+def cross_event_date_label(d: object) -> str:
+    """크로스 일자 셀용(인덱스 타입이 달라도 strftime 예외 방지)."""
+    if d is None:
+        return ""
+    try:
+        ts = pd.Timestamp(d)
+    except (TypeError, ValueError, pd.errors.OutOfBoundsDatetime):
+        return ""
+    if pd.isna(ts):
+        return ""
+    try:
+        return ts.strftime("%Y-%m-%d")
+    except (AttributeError, OSError, ValueError):
+        return ""
 
 
 @st.cache_data(ttl=600, max_entries=256, show_spinner=False)
@@ -933,8 +986,102 @@ def volume_change_summary(df: pd.DataFrame) -> Tuple[str, str]:
     return label, detail
 
 
-# 사용자가 보유한 포트폴리오 (예시, 하드코딩)
-PORTFOLIO_HOLDINGS: dict[str, int] = {
+def _composite_to_signal_bucket(composite: object) -> str:
+    """멀티팩터 종합점수 → institutional_signal_summary 와 동일한 구간."""
+    try:
+        c = float(composite)
+    except (TypeError, ValueError):
+        return "관망"
+    if pd.isna(c):
+        return "관망"
+    if c >= 65:
+        return "사라"
+    if c <= 35:
+        return "팔라"
+    return "관망"
+
+
+def first_sara_pala_signal_date_price(
+    df: pd.DataFrame,
+    bucket: str,
+    *,
+    short_window: int = 20,
+    long_window: int = 60,
+) -> tuple[str, str]:
+    """조회 일봉 구간에서 사라 또는 팔라 신호가 처음 뜬 거래일·종가(당시 시점 기준).
+
+    관망이거나 데이터가 부족하면 빈 문자열.
+    동일 end 인덱스의 quant 재계산은 lru_cache로 막아 가볍게 함.
+    """
+    if bucket not in ("사라", "팔라") or df is None or df.empty:
+        return "", ""
+
+    min_len = max(long_window + 5, 66)
+    if len(df) < min_len:
+        return "", ""
+
+    min_i = min_len - 1
+    n = len(df)
+
+    @lru_cache(maxsize=None)
+    def _bucket_at_end(end_idx: int) -> str | None:
+        if end_idx < min_i or end_idx >= n:
+            return None
+        sub = df.iloc[: end_idx + 1]
+        q = quant_multi_factor_analysis(
+            sub,
+            short_window,
+            long_window,
+            volume_filter=True,
+            atr_stop_mult=2.0,
+            atr_take_mult=3.0,
+        )
+        c = q.get("composite_100")
+        if c is None or pd.isna(c):
+            return None
+        try:
+            cf = float(c)
+        except (TypeError, ValueError):
+            return None
+        return _composite_to_signal_bucket(cf)
+
+    def _fmt_first(end_idx: int) -> tuple[str, str]:
+        sub = df.iloc[: end_idx + 1]
+        row = sub.iloc[-1]
+        first_date = cross_event_date_label(row.name)
+        px = row.get("close")
+        first_px = f"{float(px):,.2f}" if px is not None and pd.notna(px) else ""
+        return first_date, first_px
+
+    # 거친 간격(3일)으로 후보를 찾고, 없으면 전 구간 선형 스캔(기존과 동일 결과).
+    stride = 3
+    end_c: int | None = None
+    for end in range(min_i, n, stride):
+        b = _bucket_at_end(end)
+        if b == bucket:
+            end_c = end
+            break
+    if end_c is None:
+        for end in range(min_i, n):
+            b = _bucket_at_end(end)
+            if b == bucket:
+                end_c = end
+                break
+    if end_c is None:
+        return "", ""
+
+    e = end_c
+    while e > min_i:
+        b_prev = _bucket_at_end(e - 1)
+        if b_prev == bucket:
+            e -= 1
+        else:
+            break
+    return _fmt_first(e)
+
+
+# 사용자 보유 포트폴리오: 최초·파일 없을 때 기본값 (실제 목록은 portfolio_holdings.json)
+DEFAULT_PORTFOLIO_HOLDINGS: dict[str, int] = {
     "ARKB": 11151,
     "CRM": 50,
     "VST": 25,
@@ -945,6 +1092,66 @@ PORTFOLIO_HOLDINGS: dict[str, int] = {
     "TSLA": 120,
     "MSFT": 63,
 }
+
+
+def _portfolio_holdings_path() -> Path:
+    return Path(__file__).resolve().parent / "portfolio_holdings.json"
+
+
+def normalize_portfolio_ticker(raw: str) -> str:
+    """티커 정규화(대문자·공백 제거). 유효하지 않으면 빈 문자열."""
+    t = raw.strip().upper()
+    if not t or len(t) > 16:
+        return ""
+    for c in t:
+        if not (c.isalnum() or c in ".-^"):
+            return ""
+    return t
+
+
+def load_portfolio_holdings() -> dict[str, int]:
+    """로컬 JSON에서 보유 목록 로드. 없거나 오류 시 기본값."""
+    path = _portfolio_holdings_path()
+    if not path.is_file():
+        return dict(DEFAULT_PORTFOLIO_HOLDINGS)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        out: dict[str, int] = {}
+        for k, v in raw.items():
+            t = normalize_portfolio_ticker(str(k))
+            if not t:
+                continue
+            try:
+                q = int(v)
+            except (TypeError, ValueError):
+                continue
+            if q < 0:
+                continue
+            out[t] = q
+        return out if out else dict(DEFAULT_PORTFOLIO_HOLDINGS)
+    except Exception:
+        return dict(DEFAULT_PORTFOLIO_HOLDINGS)
+
+
+def save_portfolio_holdings(holdings: dict[str, int]) -> None:
+    """보유 목록을 앱 폴더의 portfolio_holdings.json 에 저장."""
+    clean: dict[str, int] = {}
+    for k, v in holdings.items():
+        t = normalize_portfolio_ticker(str(k))
+        if not t:
+            continue
+        try:
+            q = int(v)
+        except (TypeError, ValueError):
+            continue
+        if q < 0:
+            continue
+        clean[t] = q
+    path = _portfolio_holdings_path()
+    path.write_text(
+        json.dumps(dict(sorted(clean.items())), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _portfolio_error_row(tkr: str, qty: int, msg: str) -> dict:
@@ -965,54 +1172,55 @@ def _portfolio_error_row(tkr: str, qty: int, msg: str) -> dict:
         "손절가(ATR)": "",
         "목표가(ATR)": "",
         "한줄 의사결정": msg,
+        "신호최초일": "",
+        "신호당시종가(USD)": "",
         "퀀트판단": "",
         "최근 크로스/매매 의견": "",
         "최근 크로스 일자": "",
     }
 
 
-def _portfolio_row_for_ticker(tkr: str, qty: int, as_of: dt.date) -> dict:
-    """단일 보유 종목 행(병렬 워커용 — 네트워크는 load_price_data_parallel)."""
+@st.cache_data(ttl=600, max_entries=512, show_spinner=False)
+def _cached_portfolio_unit_analysis(tkr: str, as_of_iso: str) -> dict:
+    """수량과 무관한 종목×기준일 분석(캐시). 성공 시 _base_close·_base_prev 포함, 실패 시 _err."""
     try:
+        as_of = dt.date.fromisoformat(as_of_iso)
         start = as_of - dt.timedelta(days=180)
         df, _ = load_price_data_parallel(tkr, start, as_of)
         if df.empty:
-            return _portfolio_error_row(
-                tkr, qty, "일봉 데이터 없음 (티커·종료일·데이터 소스 확인)"
-            )
+            return {"_err": "일봉 데이터 없음 (티커·종료일·데이터 소스 확인)"}
 
-        today_change_pct = pd.NA
-        prev_close = pd.NA
-        closes = df["close"].dropna()
-        if closes.shape[0] >= 2:
-            prev_close = float(closes.iloc[-2])
-            last_close = float(closes.iloc[-1])
-            if prev_close != 0:
-                today_change_pct = (last_close / prev_close - 1) * 100
+        df = trim_df_to_last_valid_close(df)
+        if df.empty:
+            return {"_err": "일봉 데이터 없음 (티커·종료일·데이터 소스 확인)"}
 
         df = calculate_cross_signals(df, 20, 60)
         df = add_institutional_indicators(df)
         headline, details = institutional_signal_summary(
             df, 20, 60, volume_filter=True, atr_stop_mult=2.0, atr_take_mult=3.0
         )
-        last = df.iloc[-1]
-        close = float(last["close"])
-        value_usd = close * qty
-        prev_value_usd = float(prev_close) * qty if pd.notna(prev_close) else pd.NA
+        _row, close, prev_close_px = last_valid_close_snapshot(df)
+        if close is None:
+            return {"_err": "유효한 종가가 없습니다."}
+
+        today_change_pct = pd.NA
+        if prev_close_px is not None and prev_close_px != 0:
+            today_change_pct = (close / prev_close_px - 1) * 100
 
         latest_cross_text, latest_cross_date = get_latest_signal(df)
 
         sl = details.get("stop_loss")
         tp = details.get("take_profit")
         fac = details.get("factors") or {}
+        action = details.get("action") or ""
+        sig_bucket = _composite_to_signal_bucket(details.get("composite_100"))
+        first_sig_date, first_sig_px = first_sara_pala_signal_date_price(df, sig_bucket)
 
         return {
-            "티커": tkr,
-            "보유수량": qty,
-            "현재가(USD)": round(close, 2),
+            "_base_close": float(close),
+            "_base_prev": float(prev_close_px) if prev_close_px is not None else None,
+            "현재가(USD)": round(float(close), 2),
             "오늘변동(%)": round(float(today_change_pct), 2) if pd.notna(today_change_pct) else "",
-            "평가금액(USD)": int(round(value_usd)) if pd.notna(value_usd) else "",
-            "_전일평가금액(USD)": round(float(prev_value_usd), 2) if pd.notna(prev_value_usd) else "",
             "멀티팩터(0~100)": details.get("composite_100", ""),
             "추세": fac.get("trend", ""),
             "모멘텀": fac.get("momentum", ""),
@@ -1021,20 +1229,56 @@ def _portfolio_row_for_ticker(tkr: str, qty: int, as_of: dt.date) -> dict:
             "거래량신호": details.get("volume_quality", ""),
             "손절가(ATR)": round(float(sl), 2) if pd.notna(sl) else "",
             "목표가(ATR)": round(float(tp), 2) if pd.notna(tp) else "",
-            "한줄 의사결정": details.get("action", ""),
+            "한줄 의사결정": action,
+            "신호최초일": first_sig_date,
+            "신호당시종가(USD)": first_sig_px,
             "퀀트판단": headline,
             "최근 크로스/매매 의견": latest_cross_text,
-            "최근 크로스 일자": latest_cross_date.strftime("%Y-%m-%d")
-            if latest_cross_date is not None
-            else "",
+            "최근 크로스 일자": cross_event_date_label(latest_cross_date),
         }
     except Exception:
-        return _portfolio_error_row(tkr, qty, "분석 중 오류 (데이터 길이·티커 확인)")
+        return {"_err": ""}
 
 
-def build_portfolio_snapshot(as_of: dt.date) -> pd.DataFrame:
-    """보유 종목 기준 요약(티커별 네트워크 병렬). 실패 종목도 행으로 남겨 전체 보유가 보이게 함."""
-    items = list(PORTFOLIO_HOLDINGS.items())
+def _portfolio_row_for_ticker(tkr: str, qty: int, as_of: dt.date) -> dict:
+    """단일 보유 종목 행(병렬 워커용 — 네트워크는 load_price_data_parallel)."""
+    nt = normalize_portfolio_ticker(tkr) or tkr.strip().upper()
+    u = _cached_portfolio_unit_analysis(nt, as_of.isoformat())
+    if "_err" in u:
+        err = str(u.get("_err", ""))
+        if err == "":
+            return _portfolio_error_row(tkr, qty, "")
+        return _portfolio_error_row(tkr, qty, err)
+
+    bc = float(u.pop("_base_close"))
+    bp = u.pop("_base_prev", None)
+    prev_value_usd = bp * qty if bp is not None else pd.NA
+    value_usd = bc * qty
+
+    return {
+        "티커": tkr,
+        "보유수량": qty,
+        **u,
+        "평가금액(USD)": int(round(value_usd)) if pd.notna(value_usd) else "",
+        "_전일평가금액(USD)": round(float(prev_value_usd), 2) if pd.notna(prev_value_usd) else "",
+    }
+
+
+def _holdings_cache_key(holdings: dict[str, int]) -> str:
+    return json.dumps(sorted(holdings.items()), ensure_ascii=False)
+
+
+def _holdings_from_cache_key(holdings_key: str) -> dict[str, int]:
+    pairs = json.loads(holdings_key)
+    return {str(k): int(v) for k, v in pairs}
+
+
+@st.cache_data(ttl=600, max_entries=48, show_spinner=False)
+def _cached_portfolio_snapshot_df(as_of_iso: str, holdings_key: str) -> pd.DataFrame:
+    """동일 기준일·보유 목록에 대한 포트폴리오 표 전체 캐시."""
+    as_of = dt.date.fromisoformat(as_of_iso)
+    h = _holdings_from_cache_key(holdings_key)
+    items = list(h.items())
     rows: list[dict] = []
     if not items:
         return pd.DataFrame()
@@ -1045,17 +1289,30 @@ def build_portfolio_snapshot(as_of: dt.date) -> pd.DataFrame:
             tkr, qty = futures[fut]
             try:
                 r = fut.result()
-                rows.append(r if r is not None else _portfolio_error_row(tkr, qty, "결과 없음"))
+                rows.append(r if r is not None else _portfolio_error_row(tkr, qty, ""))
             except Exception:
-                rows.append(_portfolio_error_row(tkr, qty, "병렬 처리 오류"))
+                rows.append(_portfolio_error_row(tkr, qty, ""))
 
     if not rows:
         return pd.DataFrame()
 
     df_snap = pd.DataFrame(rows)
-    # 티커 순으로 고정해 '내 전체 보유'를 한눈에 맞추기 쉽게 함
-    df_snap = df_snap.sort_values(by="티커", ascending=True).reset_index(drop=True)
-    return df_snap
+    sort_key = pd.to_numeric(df_snap["평가금액(USD)"], errors="coerce")
+    return (
+        df_snap.assign(_pf_sort=sort_key)
+        .sort_values(by="_pf_sort", ascending=False, na_position="last")
+        .drop(columns=["_pf_sort"])
+        .reset_index(drop=True)
+    )
+
+
+def build_portfolio_snapshot(
+    as_of: dt.date,
+    holdings: dict[str, int] | None = None,
+) -> pd.DataFrame:
+    """보유 종목 기준 요약(티커별 네트워크 병렬). 실패 종목도 행으로 남겨 전체 보유가 보이게 함."""
+    h = holdings if holdings is not None else load_portfolio_holdings()
+    return _cached_portfolio_snapshot_df(as_of.isoformat(), _holdings_cache_key(h))
 
 
 def calculate_cross_signals(
@@ -1095,7 +1352,14 @@ def get_latest_signal(df: pd.DataFrame) -> Tuple[str, pd.Timestamp | None]:
 
     latest = cross_df.iloc[-1]
     cross_type = latest["cross"]
-    date = latest.name
+    raw_date = latest.name
+    date: pd.Timestamp | None = None
+    if raw_date is not None:
+        try:
+            ts = pd.Timestamp(raw_date)
+            date = ts if pd.notna(ts) else None
+        except (TypeError, ValueError, pd.errors.OutOfBoundsDatetime):
+            date = None
 
     if cross_type == "Golden Cross":
         decision = "매수(또는 보유) 우위"
@@ -1727,19 +1991,75 @@ div[data-testid="stVerticalBlock"] > div {{
     with st.sidebar:
         st.header("설정")
 
+        if "portfolio_holdings" not in st.session_state:
+            st.session_state.portfolio_holdings = load_portfolio_holdings()
+        portfolio_holdings: dict[str, int] = st.session_state.portfolio_holdings
+
+        with st.expander("나의 포트폴리오 편집", expanded=False):
+            st.caption("추가·삭제 시 `portfolio_holdings.json`에 저장됩니다.")
+            if portfolio_holdings:
+                st.dataframe(
+                    pd.DataFrame(
+                        [{"티커": k, "보유수량": v} for k, v in sorted(portfolio_holdings.items())]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.caption("등록된 종목이 없습니다. 아래에서 추가하세요.")
+
+            a1, a2, a3 = st.columns([2, 1, 1])
+            with a1:
+                add_sym = st.text_input("추가할 티커", value="", key="pf_add_sym", placeholder="예: AAPL")
+            with a2:
+                add_qty = st.number_input("수량", min_value=0, value=10, step=1, key="pf_add_qty")
+            with a3:
+                st.write("")
+                st.write("")
+                do_add = st.button("종목 추가", key="pf_do_add")
+            if do_add:
+                sym = normalize_portfolio_ticker(add_sym)
+                if not sym:
+                    st.warning("유효한 티커를 입력하세요.")
+                else:
+                    nh = dict(st.session_state.portfolio_holdings)
+                    nh[sym] = int(add_qty)
+                    st.session_state.portfolio_holdings = nh
+                    save_portfolio_holdings(nh)
+                    st.success(f"{sym} {int(add_qty)}주 반영됨")
+                    st.rerun()
+
+            if portfolio_holdings:
+                rm_sym = st.selectbox(
+                    "삭제할 티커",
+                    options=sorted(portfolio_holdings.keys()),
+                    key="pf_rm_sym",
+                )
+                if st.button("선택 종목 삭제", key="pf_do_rm"):
+                    nh = dict(st.session_state.portfolio_holdings)
+                    nh.pop(rm_sym, None)
+                    st.session_state.portfolio_holdings = nh
+                    save_portfolio_holdings(nh)
+                    st.rerun()
+
+        st.divider()
+
         # 내 보유 종목 리스트
-        holdings_list = list(PORTFOLIO_HOLDINGS.keys())
+        holdings_list = sorted(portfolio_holdings.keys())
         default_ticker = holdings_list[0] if holdings_list else "AAPL"
 
-        # 보유 종목 선택 시 티커 입력 자동 반영
-        selected_holding = st.selectbox(
-            "내 보유 종목에서 선택",
-            options=holdings_list,
-            index=0 if holdings_list else 0,
-        )
+        if holdings_list:
+            selected_holding = st.selectbox(
+                "내 보유 종목에서 선택",
+                options=holdings_list,
+                index=0,
+            )
+        else:
+            st.caption("포트폴리오가 비어 있으면 위 편집에서 종목을 추가하세요.")
+            selected_holding = default_ticker
 
         # text_input과 동기화: 사용자가 직접 수정도 가능
-        current_ticker_default = selected_holding or default_ticker
+        current_ticker_default = selected_holding if holdings_list else default_ticker
         ticker = st.text_input(
             "티커 (예: AAPL, TSLA, MSFT)",
             value=current_ticker_default,
@@ -1891,7 +2211,8 @@ div[data-testid="stVerticalBlock"] > div {{
         st.write(cross_proj_detail)
 
     # 분석 티커 가격 요약 (현재가/1/2/3/5/2주(10거래일) 예상) — 회귀 1회
-    last_close = float(df["close"].dropna().iloc[-1]) if not df["close"].dropna().empty else pd.NA
+    price_terminal_row, last_close_num, _ = last_valid_close_snapshot(df)
+    last_close = pd.NA if last_close_num is None else float(last_close_num)
     _mh = multi_horizon_price_labels(df, (1, 2, 3, 5, 10))
     proj1_label = _mh.get(1, "예측 불가")
     proj2_label = _mh.get(2, "예측 불가")
@@ -1928,7 +2249,7 @@ div[data-testid="stVerticalBlock"] > div {{
         st.write(vol_detail)
 
     st.subheader("기관용 터미널 — 단기 · 중기 · 장기 · MACD · ATR")
-    last = df.iloc[-1]
+    last = price_terminal_row if price_terminal_row is not None else df.iloc[-1]
     term_html = institutional_terminal_html(
         ticker,
         last,
@@ -1953,7 +2274,7 @@ div[data-testid="stVerticalBlock"] > div {{
     if load_portfolio:
         st.subheader("내 포트폴리오 (멀티팩터 · 거래량 · ATR 손절/목표)")
         with st.spinner("포트폴리오 종목 데이터를 불러오는 중..."):
-            snap = build_portfolio_snapshot(as_of=end_date)
+            snap = build_portfolio_snapshot(as_of=end_date, holdings=portfolio_holdings)
         if snap.empty:
             st.info("포트폴리오 요약을 계산할 수 없습니다. 데이터 소스 또는 티커를 확인해주세요.")
         else:

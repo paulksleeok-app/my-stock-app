@@ -1,17 +1,16 @@
-"""휴대폰·브라우저 전용 경량 요약.
+"""모바일·브라우저 전용: 보유 포트폴리오 종목의 기관용 터미널 요약만 표시.
 
-차트 없이 숫자·문구만 표시해 데이터·렌더 비용을 줄였습니다. Streamlit Cloud 등
-배포 URL만 있으면 Wi-Fi/셀룰러 등 인터넷 되는 곳 어디서나 같은 화면을 볼 수 있습니다.
-로컬 PC 전용이 아닙니다 — `streamlit run mobile_app.py` 는 개발용입니다.
+`app.py`와 동일한 지표·기간·이평 설정으로 `institutional_terminal_html`을 렌더합니다.
+배포(Streamlit Cloud 등) 시 엔트리로 `mobile_app.py`를 지정할 수 있습니다.
+
+로컬 실행: `streamlit run mobile_app.py`
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import html
 from zoneinfo import ZoneInfo
 
-import pandas as pd
 import streamlit as st
 
 
@@ -24,27 +23,9 @@ def _market_last_us_date() -> dt.date:
     return now_us
 
 
-def _fmt_num(x, *, digits: int = 2) -> str:
-    if x is None:
-        return "—"
-    try:
-        if pd.isna(x):
-            return "—"
-    except TypeError:
-        pass
-    try:
-        v = float(x)
-    except (TypeError, ValueError):
-        return "—"
-    if pd.isna(v):
-        return "—"
-    return f"{v:,.{digits}f}"
-
-
 def main() -> None:
-    # 반드시 첫 Streamlit 호출이어야 함. app은 이후에 지연 import (캐시·무거운 모듈 로드 분리).
     st.set_page_config(
-        page_title="주식 요약 (모바일)",
+        page_title="포트폴리오 · 기관 터미널",
         layout="centered",
         initial_sidebar_state="collapsed",
         menu_items={
@@ -55,189 +36,130 @@ def main() -> None:
     )
     import app as core
 
-    # 터치·가독성 + 불필요한 리소스 최소화 (차트 라이브러리 미사용)
-    if st.session_state.get("_mobile_css") is not True:
-        st.session_state["_mobile_css"] = True
+    base_font_px = 13
+    if st.session_state.get("_mobile_term_css") is not True:
+        st.session_state["_mobile_term_css"] = True
         st.markdown(
-            """
+            f"""
 <style>
-  html { -webkit-text-size-adjust: 100%; }
-  .block-container {
+  html {{ -webkit-text-size-adjust: 100%; }}
+  .block-container {{
     padding-top: max(0.75rem, env(safe-area-inset-top)) !important;
     padding-left: max(0.75rem, env(safe-area-inset-left)) !important;
     padding-right: max(0.75rem, env(safe-area-inset-right)) !important;
     padding-bottom: max(0.5rem, env(safe-area-inset-bottom)) !important;
     max-width: min(560px, 100%) !important;
-  }
-  h1 { font-size: 1.25rem !important; margin-bottom: 0.35rem !important; }
-  h2, h3 { font-size: 1.05rem !important; }
-  [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
-  button[kind="header"] { min-height: 44px; }
-  .mobile-section {
-    background: #f6f8fa;
-    border: 1px solid #e1e4e8;
-    border-radius: 8px;
-    padding: 0.65rem 0.75rem;
-    margin: 0.4rem 0 0.75rem 0;
-  }
-  .mobile-row { font-size: 0.95rem; line-height: 1.45; padding: 0.2rem 0; border-bottom: 1px solid #eaecef; }
-  .mobile-row:last-child { border-bottom: none; }
-  .mobile-k { color: #57606a; }
-  .mobile-v { font-weight: 600; color: #24292f; }
+  }}
+  h1 {{ font-size: 1.2rem !important; margin-bottom: 0.35rem !important; }}
+  h2, h3 {{ font-size: 1.02rem !important; }}
+  .quant-terminal {{
+    background: #0d1117;
+    color: #c9d1d9;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    padding: 0.75rem 0.85rem;
+    border-radius: 6px;
+    border: 1px solid #30363d;
+    margin: 0.35rem 0 0.6rem 0;
+    font-size: {base_font_px}px !important;
+    line-height: 1.42 !important;
+  }}
+  .quant-terminal .qt-row {{ margin: 0.18rem 0; }}
+  .quant-terminal .qt-k {{ color: #8b949e; }}
+  .quant-terminal .qt-v {{ color: #58a6ff; font-weight: 600; }}
+  .quant-terminal .qt-ok {{ color: #3fb950; }}
+  .quant-terminal .qt-warn {{ color: #f85149; }}
+  .quant-terminal .qt-muted {{ color: #6e7681; font-size: 0.92em; }}
+  .quant-terminal .qt-section {{
+    color: #d29922;
+    font-weight: 700;
+    margin-top: 0.45rem;
+    margin-bottom: 0.12rem;
+    padding-bottom: 0.12rem;
+    border-bottom: 1px solid #30363d;
+    letter-spacing: 0.02em;
+  }}
 </style>
 """,
             unsafe_allow_html=True,
         )
 
-    st.title("📱 미국 주식 · 요약")
+    st.title("📱 포트폴리오 · 기관 터미널")
     st.caption(
-        "인터넷만 연결된 브라우저에서 열면 됩니다. "
-        "배포 주소(Streamlit Cloud 등)를 즐겨찾기해 두면 어디서든 동일하게 볼 수 있어요."
+        "PC 대시보드(`app.py`)와 같은 멀티팩터·이평·ATR 설정으로 보유 종목별 터미널만 보여 줍니다."
     )
 
-    holdings = list(core.PORTFOLIO_HOLDINGS.keys())
-    default_t = holdings[0] if holdings else "AAPL"
-
-    with st.sidebar:
-        st.caption("설정")
-        if holdings:
-            pick = st.selectbox("보유 종목", options=holdings, index=0)
-        else:
-            pick = "AAPL"
-        ticker = st.text_input("티커", value=pick).strip().upper() or default_t
-
-        m_last = _market_last_us_date()
-        days_back = st.slider(
-            "조회 일수 (짧을수록 빠름·데이터 적음)",
-            min_value=60,
-            max_value=365,
-            value=90,
-            step=10,
-            help="이평·지표에 필요한 최소 길이만 넘기면 됩니다. 짧을수록 네트워크·계산이 가벼워집니다.",
+    holdings = core.load_portfolio_holdings()
+    if not holdings:
+        st.info(
+            "보유 종목이 없습니다. PC 앱에서 포트폴리오를 편집하거나, "
+            "배포 환경에 `portfolio_holdings.json`을 두세요."
         )
-        short_w = st.number_input("단기 이평", 3, 120, 20)
-        long_w = st.number_input("장기 이평", 10, 365, 60)
-        if short_w >= long_w:
-            st.warning("단기 이평은 장기보다 작아야 합니다.")
-        st.caption("티커·기간·이평을 바꾸면 자동으로 다시 계산됩니다.")
-
-    if short_w >= long_w:
-        st.error("단기 이평 < 장기 이평으로 맞춰주세요.")
         return
 
-    start_d = m_last - dt.timedelta(days=int(days_back))
-    end_d = m_last
+    end_d = _market_last_us_date()
+    start_d = end_d - dt.timedelta(days=365)
 
-    with st.spinner("데이터 로드 중…"):
-        df, err = core.load_price_data(ticker, start_d, end_d)
+    short_w, mid_w, long_w = 20, 50, 60
+    rsi_w, atr_w = 14, 14
+    bb_w, bb_k = 20, 2.0
+    atr_stop_m, atr_take_m = 2.0, 3.0
+    vol_f = True
 
-    if df.empty:
-        st.error(err or "데이터를 가져오지 못했습니다.")
-        return
+    st.caption(f"기간: {start_d} ~ {end_d} · 이평 {short_w}/{mid_w}/{long_w} · RSI {rsi_w} · ATR {atr_w}")
 
-    df = core.calculate_cross_signals(df, short_w, long_w)
-    df = core.add_institutional_indicators(df)
-    headline, inst = core.institutional_signal_summary(
-        df,
-        short_w,
-        long_w,
-        volume_filter=True,
-        atr_stop_mult=2.0,
-        atr_take_mult=3.0,
-    )
-    sig_text, sig_date = core.get_latest_signal(df)
-    vol_label, _ = core.volume_change_summary(df)
+    with st.spinner("포트폴리오 종목 데이터를 불러오는 중…"):
+        items = sorted(holdings.items(), key=lambda x: x[0])
+        for i, (tkr, qty) in enumerate(items):
+            df, err = core.load_price_data(tkr, start_d, end_d)
+            title = f"{tkr} · 보유 {qty}주"
+            if df.empty:
+                with st.expander(title, expanded=(i == 0)):
+                    st.warning(err or "일봉 데이터를 가져오지 못했습니다.")
+                continue
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) >= 2 else None
-    close = float(last["close"]) if pd.notna(last.get("close")) else None
-    chg_pct = None
-    if prev is not None and pd.notna(prev.get("close")) and close and float(prev["close"]) != 0:
-        chg_pct = (close / float(prev["close"]) - 1.0) * 100.0
+            df = core.trim_df_to_last_valid_close(df)
+            if df.empty:
+                with st.expander(title, expanded=(i == 0)):
+                    st.warning("유효한 종가가 없습니다.")
+                continue
 
-    fac = inst.get("factors") or {}
-    reasons = inst.get("reasons") or []
-    vol_reasons = [r for r in reasons if "수급" in r or "거래량" in r][:5]
-    if not vol_reasons:
-        vol_reasons = [r for r in reasons if r][:4]
+            df = core.calculate_cross_signals(df, short_w, long_w)
+            df[f"ma_{int(mid_w)}"] = df["close"].rolling(
+                window=int(mid_w), min_periods=int(mid_w)
+            ).mean()
+            df = core.add_institutional_indicators(
+                df,
+                rsi_window=int(rsi_w),
+                atr_window=int(atr_w),
+                bb_window=int(bb_w),
+                bb_k=float(bb_k),
+            )
+            inst_headline, inst_details = core.institutional_signal_summary(
+                df,
+                short_window=short_w,
+                long_window=long_w,
+                volume_filter=vol_f,
+                atr_stop_mult=atr_stop_m,
+                atr_take_mult=atr_take_m,
+            )
+            price_row, _, _ = core.last_valid_close_snapshot(df)
+            last = price_row if price_row is not None else df.iloc[-1]
 
-    # —— 기관형 수급(거래량·정합) —— #
-    st.subheader("기관 수급 정보")
-    vq = html.escape(str(inst.get("volume_quality") or "—"))
-    v_score = html.escape(str(fac.get("volume", "")))
-    vol_safe = html.escape(str(vol_label))
-    st.markdown(
-        f'<div class="mobile-section">'
-        f'<div class="mobile-row"><span class="mobile-k">거래량 신호</span> '
-        f'<span class="mobile-v">{vq}</span></div>'
-        f'<div class="mobile-row"><span class="mobile-k">수급 팩터 (−1~1)</span> '
-        f'<span class="mobile-v">{v_score}</span></div>'
-        f'<div class="mobile-row"><span class="mobile-k">거래량 추이 요약</span> '
-        f'<span class="mobile-v">{vol_safe}</span></div>'
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-    if vol_reasons:
-        st.caption("근거 (수급·거래량 관련)")
-        for line in vol_reasons:
-            st.write(f"· {line}")
-    else:
-        st.caption("수급 관련 상세 근거가 없습니다.")
-
-    # —— 핵심 지표 —— #
-    st.subheader("핵심 지표")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric("종가 (USD)", _fmt_num(close, digits=2) if close is not None else "—")
-    with c2:
-        st.metric("전일 대비", f"{chg_pct:+.2f}%" if chg_pct is not None else "—")
-
-    c3, c4 = st.columns(2)
-    with c3:
-        st.metric("종합 점수 (0~100)", str(inst.get("composite_100", "—")))
-    with c4:
-        h = str(headline)
-        st.metric("퀀트 판단", h[:28] + "…" if len(h) > 28 else h)
-
-    rsi = last.get("rsi")
-    macd_h = last.get("macd_hist")
-    atr_v = last.get("atr")
-    st.markdown(
-        f'<div class="mobile-section">'
-        f'<div class="mobile-row"><span class="mobile-k">RSI</span> '
-        f'<span class="mobile-v">{_fmt_num(rsi, digits=1)}</span></div>'
-        f'<div class="mobile-row"><span class="mobile-k">MACD 히스토그램</span> '
-        f'<span class="mobile-v">{_fmt_num(macd_h, digits=4)}</span></div>'
-        f'<div class="mobile-row"><span class="mobile-k">ATR</span> '
-        f'<span class="mobile-v">{_fmt_num(atr_v, digits=3)}</span></div>'
-        f'<div class="mobile-row"><span class="mobile-k">추세/모멘텀/변동성 팩터</span> '
-        f'<span class="mobile-v">'
-        f'{fac.get("trend", "—")} / {fac.get("momentum", "—")} / {fac.get("volatility", "—")}'
-        f"</span></div>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-    sl = inst.get("stop_loss")
-    tp = inst.get("take_profit")
-    rr = inst.get("rr_ratio")
-    st.markdown(
-        f'<div class="mobile-section">'
-        f'<div class="mobile-row"><span class="mobile-k">ATR 손절가</span> '
-        f'<span class="mobile-v">{_fmt_num(sl, digits=2)} USD</span></div>'
-        f'<div class="mobile-row"><span class="mobile-k">ATR 목표가</span> '
-        f'<span class="mobile-v">{_fmt_num(tp, digits=2)} USD</span></div>'
-        f'<div class="mobile-row"><span class="mobile-k">손익비 (R)</span> '
-        f'<span class="mobile-v">{_fmt_num(rr, digits=2)}</span></div>'
-        f'<div class="mobile-row"><span class="mobile-k">한줄 의사결정</span> '
-        f'<span class="mobile-v">{html.escape(str(inst.get("action", "—")))}</span></div>'
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.caption(f"최근 크로스: {sig_text}" + (f" ({sig_date.date()})" if sig_date is not None else ""))
-    st.caption(f"기간: {start_d} ~ {end_d} · 이평 {short_w}/{long_w}")
+            term_html = core.institutional_terminal_html(
+                tkr,
+                last,
+                short_window=int(short_w),
+                mid_window=int(mid_w),
+                long_window=int(long_w),
+                rsi_window=int(rsi_w),
+                atr_window=int(atr_w),
+                atr_stop_mult=float(atr_stop_m),
+                atr_take_mult=float(atr_take_m),
+                inst_headline=inst_headline,
+                inst_details=inst_details,
+            )
+            with st.expander(title, expanded=(i == 0)):
+                st.markdown(term_html, unsafe_allow_html=True)
 
 
-# Streamlit Cloud는 스크립트를 엔트리포인트로 실행합니다. __name__ 가드 없이 호출해 항상 부팅되게 합니다.
 main()
