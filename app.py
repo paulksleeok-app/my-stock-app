@@ -1952,12 +1952,6 @@ div[data-testid="stVerticalBlock"] > div {{
     # 내 포트폴리오 (선택 시에만 — 다종목 네트워크 부하)
     if load_portfolio:
         st.subheader("내 포트폴리오 (멀티팩터 · 거래량 · ATR 손절/목표)")
-        holdings_df = pd.DataFrame(
-            [{"티커": t, "보유수량": q} for t, q in sorted(PORTFOLIO_HOLDINGS.items())]
-        )
-        st.markdown("**나의 전체 보유 종목**")
-        st.dataframe(holdings_df, use_container_width=True, hide_index=True)
-
         with st.spinner("포트폴리오 종목 데이터를 불러오는 중..."):
             snap = build_portfolio_snapshot(as_of=end_date)
         if snap.empty:
@@ -1983,7 +1977,7 @@ div[data-testid="stVerticalBlock"] > div {{
                 st.metric("포트폴리오 총 평가금액(USD 기준)", f"{total_usd:,.0f}")
 
             snap_no_hidden = snap.drop(columns=["_전일평가금액(USD)"], errors="ignore")
-            st.markdown("**종목별 상세 요약 (보유 전체)**")
+            st.markdown("**종목별 상세 요약**")
             st.dataframe(snap_no_hidden, use_container_width=True, hide_index=True)
 
     st.subheader("룰 기반 백테스트(단순)")
