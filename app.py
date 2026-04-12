@@ -947,84 +947,114 @@ PORTFOLIO_HOLDINGS: dict[str, int] = {
 }
 
 
-def _portfolio_row_for_ticker(tkr: str, qty: int, as_of: dt.date) -> dict | None:
-    """단일 보유 종목 행(병렬 워커용 — 네트워크는 load_price_data_parallel)."""
-    start = as_of - dt.timedelta(days=180)
-    df, _ = load_price_data_parallel(tkr, start, as_of)
-    if df.empty:
-        return None
-
-    today_change_pct = pd.NA
-    prev_close = pd.NA
-    closes = df["close"].dropna()
-    if closes.shape[0] >= 2:
-        prev_close = float(closes.iloc[-2])
-        last_close = float(closes.iloc[-1])
-        if prev_close != 0:
-            today_change_pct = (last_close / prev_close - 1) * 100
-
-    df = calculate_cross_signals(df, 20, 60)
-    df = add_institutional_indicators(df)
-    headline, details = institutional_signal_summary(
-        df, 20, 60, volume_filter=True, atr_stop_mult=2.0, atr_take_mult=3.0
-    )
-    last = df.iloc[-1]
-    close = float(last["close"])
-    value_usd = close * qty
-    prev_value_usd = float(prev_close) * qty if pd.notna(prev_close) else pd.NA
-
-    latest_cross_text, latest_cross_date = get_latest_signal(df)
-
-    sl = details.get("stop_loss")
-    tp = details.get("take_profit")
-    fac = details.get("factors") or {}
-
+def _portfolio_error_row(tkr: str, qty: int, msg: str) -> dict:
+    """데이터 부족·오류 시에도 티커 행을 유지해 보유 전체 목록이 끊기지 않게 함."""
     return {
         "티커": tkr,
         "보유수량": qty,
-        "현재가(USD)": round(close, 2),
-        "오늘변동(%)": round(float(today_change_pct), 2) if pd.notna(today_change_pct) else "",
-        "평가금액(USD)": int(round(value_usd)) if pd.notna(value_usd) else "",
-        "_전일평가금액(USD)": round(float(prev_value_usd), 2) if pd.notna(prev_value_usd) else "",
-        "멀티팩터(0~100)": details.get("composite_100", ""),
-        "추세": fac.get("trend", ""),
-        "모멘텀": fac.get("momentum", ""),
-        "변동성": fac.get("volatility", ""),
-        "거래량점수": fac.get("volume", ""),
-        "거래량신호": details.get("volume_quality", ""),
-        "손절가(ATR)": round(float(sl), 2) if pd.notna(sl) else "",
-        "목표가(ATR)": round(float(tp), 2) if pd.notna(tp) else "",
-        "한줄 의사결정": details.get("action", ""),
-        "퀀트판단": headline,
-        "최근 크로스/매매 의견": latest_cross_text,
-        "최근 크로스 일자": latest_cross_date.strftime("%Y-%m-%d")
-        if latest_cross_date is not None
-        else "",
+        "현재가(USD)": "",
+        "오늘변동(%)": "",
+        "평가금액(USD)": "",
+        "_전일평가금액(USD)": "",
+        "멀티팩터(0~100)": "",
+        "추세": "",
+        "모멘텀": "",
+        "변동성": "",
+        "거래량점수": "",
+        "거래량신호": "",
+        "손절가(ATR)": "",
+        "목표가(ATR)": "",
+        "한줄 의사결정": msg,
+        "퀀트판단": "",
+        "최근 크로스/매매 의견": "",
+        "최근 크로스 일자": "",
     }
 
 
+def _portfolio_row_for_ticker(tkr: str, qty: int, as_of: dt.date) -> dict:
+    """단일 보유 종목 행(병렬 워커용 — 네트워크는 load_price_data_parallel)."""
+    try:
+        start = as_of - dt.timedelta(days=180)
+        df, _ = load_price_data_parallel(tkr, start, as_of)
+        if df.empty:
+            return _portfolio_error_row(
+                tkr, qty, "일봉 데이터 없음 (티커·종료일·데이터 소스 확인)"
+            )
+
+        today_change_pct = pd.NA
+        prev_close = pd.NA
+        closes = df["close"].dropna()
+        if closes.shape[0] >= 2:
+            prev_close = float(closes.iloc[-2])
+            last_close = float(closes.iloc[-1])
+            if prev_close != 0:
+                today_change_pct = (last_close / prev_close - 1) * 100
+
+        df = calculate_cross_signals(df, 20, 60)
+        df = add_institutional_indicators(df)
+        headline, details = institutional_signal_summary(
+            df, 20, 60, volume_filter=True, atr_stop_mult=2.0, atr_take_mult=3.0
+        )
+        last = df.iloc[-1]
+        close = float(last["close"])
+        value_usd = close * qty
+        prev_value_usd = float(prev_close) * qty if pd.notna(prev_close) else pd.NA
+
+        latest_cross_text, latest_cross_date = get_latest_signal(df)
+
+        sl = details.get("stop_loss")
+        tp = details.get("take_profit")
+        fac = details.get("factors") or {}
+
+        return {
+            "티커": tkr,
+            "보유수량": qty,
+            "현재가(USD)": round(close, 2),
+            "오늘변동(%)": round(float(today_change_pct), 2) if pd.notna(today_change_pct) else "",
+            "평가금액(USD)": int(round(value_usd)) if pd.notna(value_usd) else "",
+            "_전일평가금액(USD)": round(float(prev_value_usd), 2) if pd.notna(prev_value_usd) else "",
+            "멀티팩터(0~100)": details.get("composite_100", ""),
+            "추세": fac.get("trend", ""),
+            "모멘텀": fac.get("momentum", ""),
+            "변동성": fac.get("volatility", ""),
+            "거래량점수": fac.get("volume", ""),
+            "거래량신호": details.get("volume_quality", ""),
+            "손절가(ATR)": round(float(sl), 2) if pd.notna(sl) else "",
+            "목표가(ATR)": round(float(tp), 2) if pd.notna(tp) else "",
+            "한줄 의사결정": details.get("action", ""),
+            "퀀트판단": headline,
+            "최근 크로스/매매 의견": latest_cross_text,
+            "최근 크로스 일자": latest_cross_date.strftime("%Y-%m-%d")
+            if latest_cross_date is not None
+            else "",
+        }
+    except Exception:
+        return _portfolio_error_row(tkr, qty, "분석 중 오류 (데이터 길이·티커 확인)")
+
+
 def build_portfolio_snapshot(as_of: dt.date) -> pd.DataFrame:
-    """보유 종목 기준 요약(티커별 네트워크 병렬)."""
+    """보유 종목 기준 요약(티커별 네트워크 병렬). 실패 종목도 행으로 남겨 전체 보유가 보이게 함."""
     items = list(PORTFOLIO_HOLDINGS.items())
     rows: list[dict] = []
     if not items:
         return pd.DataFrame()
     max_w = min(6, len(items))
     with ThreadPoolExecutor(max_workers=max_w) as ex:
-        futures = {ex.submit(_portfolio_row_for_ticker, t, q, as_of): t for t, q in items}
+        futures = {ex.submit(_portfolio_row_for_ticker, t, q, as_of): (t, q) for t, q in items}
         for fut in as_completed(futures):
+            tkr, qty = futures[fut]
             try:
                 r = fut.result()
-                if r:
-                    rows.append(r)
+                rows.append(r if r is not None else _portfolio_error_row(tkr, qty, "결과 없음"))
             except Exception:
-                continue
+                rows.append(_portfolio_error_row(tkr, qty, "병렬 처리 오류"))
 
     if not rows:
         return pd.DataFrame()
 
     df_snap = pd.DataFrame(rows)
-    df_snap = df_snap.sort_values(by="평가금액(USD)", ascending=False).reset_index(drop=True)
+    # 티커 순으로 고정해 '내 전체 보유'를 한눈에 맞추기 쉽게 함
+    df_snap = df_snap.sort_values(by="티커", ascending=True).reset_index(drop=True)
     return df_snap
 
 
@@ -1761,9 +1791,9 @@ div[data-testid="stVerticalBlock"] > div {{
             st.warning("이동평균은 단기 < 중기 < 장기 순이어야 합니다.")
 
         load_portfolio = st.checkbox(
-            "포트폴리오 요약 로드 (보유 다종목·네트워크 병렬)",
+            "내 포트폴리오 요약 로드 (보유 전체·다종목 병렬)",
             value=False,
-            help="끄면 메인 분석만 실행되어 Streamlit Cloud에서 훨씬 빠릅니다.",
+            help="켜면 분석 후 설정된 보유 종목 전체를 표로 보여 줍니다. 끄면 메인 분석만 실행되어 더 빠릅니다.",
         )
 
         run = st.button("분석하기")
@@ -1922,6 +1952,12 @@ div[data-testid="stVerticalBlock"] > div {{
     # 내 포트폴리오 (선택 시에만 — 다종목 네트워크 부하)
     if load_portfolio:
         st.subheader("내 포트폴리오 (멀티팩터 · 거래량 · ATR 손절/목표)")
+        holdings_df = pd.DataFrame(
+            [{"티커": t, "보유수량": q} for t, q in sorted(PORTFOLIO_HOLDINGS.items())]
+        )
+        st.markdown("**나의 전체 보유 종목**")
+        st.dataframe(holdings_df, use_container_width=True, hide_index=True)
+
         with st.spinner("포트폴리오 종목 데이터를 불러오는 중..."):
             snap = build_portfolio_snapshot(as_of=end_date)
         if snap.empty:
@@ -1947,8 +1983,8 @@ div[data-testid="stVerticalBlock"] > div {{
                 st.metric("포트폴리오 총 평가금액(USD 기준)", f"{total_usd:,.0f}")
 
             snap_no_hidden = snap.drop(columns=["_전일평가금액(USD)"], errors="ignore")
-            with st.expander("포트폴리오 상세 항목 보기", expanded=True):
-                st.dataframe(snap_no_hidden, use_container_width=True, hide_index=True)
+            st.markdown("**종목별 상세 요약 (보유 전체)**")
+            st.dataframe(snap_no_hidden, use_container_width=True, hide_index=True)
 
     st.subheader("룰 기반 백테스트(단순)")
     bt = backtest_ma_atr_strategy(
