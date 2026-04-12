@@ -174,8 +174,8 @@ def main() -> None:
                     p_s = html.escape(sig_first_px) if sig_first_px else "—"
                     b_s = html.escape(sig_bucket)
                     st.markdown(
-                        f'<p class="sig-first-hint">«{b_s}» 최초 안내일: <strong>{d_s}</strong> · '
-                        f'당시 종가: <strong>{p_s} USD</strong></p>',
+                        f'<p class="sig-first-hint">«{b_s}» 신호최초일: <strong>{d_s}</strong> · '
+                        f'신호당시종가(USD): <strong>{p_s}</strong></p>',
                         unsafe_allow_html=True,
                     )
                 st.markdown(term_html, unsafe_allow_html=True)
