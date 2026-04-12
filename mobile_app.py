@@ -165,7 +165,7 @@ def main() -> None:
                 inst_headline=inst_headline,
                 inst_details=inst_details,
             )
-            sig_bucket = core._composite_to_signal_bucket(inst_details.get("composite_100"))
+            sig_bucket = core.signal_bucket_from_action_line(inst_details.get("action"))
             sig_first_d, sig_first_px = core.first_sara_pala_signal_date_price(df, sig_bucket)
 
             with st.expander(title, expanded=(i == 0)):
