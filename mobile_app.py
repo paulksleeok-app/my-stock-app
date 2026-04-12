@@ -1,6 +1,6 @@
 """모바일·브라우저 전용: 보유 포트폴리오 종목의 기관용 터미널 요약만 표시.
 
-`app.py`와 동일한 지표·기간·이평 설정으로 `institutional_terminal_html`을 렌더합니다.
+`app.py` 포트폴리오와 동일하게 최근 미국 거래일 기준 **180일** 일봉·지표·신호최초일을 씁니다.
 배포(Streamlit Cloud 등) 시 엔트리로 `mobile_app.py`를 지정할 수 있습니다.
 
 로컬 실행: `streamlit run mobile_app.py`
@@ -104,7 +104,8 @@ def main() -> None:
         return
 
     end_d = _market_last_us_date()
-    start_d = end_d - dt.timedelta(days=365)
+    # PC 포트폴리오(`_cached_portfolio_unit_analysis`)와 동일: 신호최초일·멀티팩터는 180일 구간
+    start_d = end_d - dt.timedelta(days=180)
 
     short_w, mid_w, long_w = 20, 50, 60
     rsi_w, atr_w = 14, 14
