@@ -1001,6 +1001,21 @@ def _composite_to_signal_bucket(composite: object) -> str:
     return "관망"
 
 
+def signal_bucket_from_action_line(action: str | None) -> str:
+    """한줄 의사결정 문구 기준 사라 / 팔라 / 관망.
+
+    신호최초일·당시 종가는 이 구간과 동일한 의미로 스캔한다(PC·모바일 공통).
+    """
+    if not action:
+        return "관망"
+    a = str(action)
+    if "사라" in a:
+        return "사라"
+    if "팔라" in a:
+        return "팔라"
+    return "관망"
+
+
 def first_sara_pala_signal_date_price(
     df: pd.DataFrame,
     bucket: str,
@@ -1213,7 +1228,7 @@ def _cached_portfolio_unit_analysis(tkr: str, as_of_iso: str) -> dict:
         tp = details.get("take_profit")
         fac = details.get("factors") or {}
         action = details.get("action") or ""
-        sig_bucket = _composite_to_signal_bucket(details.get("composite_100"))
+        sig_bucket = signal_bucket_from_action_line(action)
         first_sig_date, first_sig_px = first_sara_pala_signal_date_price(df, sig_bucket)
 
         return {
