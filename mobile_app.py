@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import html
 from zoneinfo import ZoneInfo
 
 import streamlit as st
@@ -77,6 +78,12 @@ def main() -> None:
     padding-bottom: 0.12rem;
     border-bottom: 1px solid #30363d;
     letter-spacing: 0.02em;
+  }}
+  .sig-first-hint {{
+    font-size: 0.88rem;
+    color: #57606a;
+    margin: 0 0 0.5rem 0;
+    line-height: 1.4;
   }}
 </style>
 """,
@@ -158,7 +165,19 @@ def main() -> None:
                 inst_headline=inst_headline,
                 inst_details=inst_details,
             )
+            sig_bucket = core._composite_to_signal_bucket(inst_details.get("composite_100"))
+            sig_first_d, sig_first_px = core.first_sara_pala_signal_date_price(df, sig_bucket)
+
             with st.expander(title, expanded=(i == 0)):
+                if sig_bucket in ("사라", "팔라"):
+                    d_s = html.escape(sig_first_d) if sig_first_d else "—"
+                    p_s = html.escape(sig_first_px) if sig_first_px else "—"
+                    b_s = html.escape(sig_bucket)
+                    st.markdown(
+                        f'<p class="sig-first-hint">«{b_s}» 최초 안내일: <strong>{d_s}</strong> · '
+                        f'당시 종가: <strong>{p_s} USD</strong></p>',
+                        unsafe_allow_html=True,
+                    )
                 st.markdown(term_html, unsafe_allow_html=True)
 
 
