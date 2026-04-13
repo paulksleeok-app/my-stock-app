@@ -1196,21 +1196,30 @@ def _portfolio_error_row(tkr: str, qty: int, msg: str) -> dict:
 
 
 @st.cache_data(ttl=600, max_entries=512, show_spinner=False)
+def _prepare_portfolio_unit_df(tkr: str, as_of: dt.date) -> tuple[pd.DataFrame | None, str | None]:
+    """PC 포트폴리오 요약(`build_portfolio_snapshot`)과 동일: 180일·20/60 크로스·기본 지표까지."""
+    nt = normalize_portfolio_ticker(tkr) or tkr.strip().upper()
+    start = as_of - dt.timedelta(days=180)
+    df, _ = load_price_data_parallel(nt, start, as_of)
+    if df.empty:
+        return None, "일봉 데이터 없음 (티커·종료일·데이터 소스 확인)"
+    df = trim_df_to_last_valid_close(df)
+    if df.empty:
+        return None, "일봉 데이터 없음 (티커·종료일·데이터 소스 확인)"
+    df = calculate_cross_signals(df, 20, 60)
+    df = add_institutional_indicators(df)
+    return df, None
+
+
+@st.cache_data(ttl=600, max_entries=512, show_spinner=False)
 def _cached_portfolio_unit_analysis(tkr: str, as_of_iso: str) -> dict:
     """수량과 무관한 종목×기준일 분석(캐시). 성공 시 _base_close·_base_prev 포함, 실패 시 _err."""
     try:
         as_of = dt.date.fromisoformat(as_of_iso)
-        start = as_of - dt.timedelta(days=180)
-        df, _ = load_price_data_parallel(tkr, start, as_of)
-        if df.empty:
-            return {"_err": "일봉 데이터 없음 (티커·종료일·데이터 소스 확인)"}
+        df, prep_err = _prepare_portfolio_unit_df(tkr, as_of)
+        if df is None:
+            return {"_err": prep_err or ""}
 
-        df = trim_df_to_last_valid_close(df)
-        if df.empty:
-            return {"_err": "일봉 데이터 없음 (티커·종료일·데이터 소스 확인)"}
-
-        df = calculate_cross_signals(df, 20, 60)
-        df = add_institutional_indicators(df)
         headline, details = institutional_signal_summary(
             df, 20, 60, volume_filter=True, atr_stop_mult=2.0, atr_take_mult=3.0
         )
@@ -1328,6 +1337,78 @@ def build_portfolio_snapshot(
     """보유 종목 기준 요약(티커별 네트워크 병렬). 실패 종목도 행으로 남겨 전체 보유가 보이게 함."""
     h = holdings if holdings is not None else load_portfolio_holdings()
     return _cached_portfolio_snapshot_df(as_of.isoformat(), _holdings_cache_key(h))
+
+
+def mobile_portfolio_expander_content(
+    tkr: str,
+    qty: int,
+    as_of: dt.date,
+    *,
+    mid_window: int = 50,
+) -> dict:
+    """모바일 UI용: PC `build_portfolio_snapshot`과 동일 일봉·지표 파이프라인 후 터미널 HTML을 만든다."""
+    df, prep_err = _prepare_portfolio_unit_df(tkr, as_of)
+    if df is None:
+        return {
+            "ok": False,
+            "tkr": tkr,
+            "qty": qty,
+            "err": prep_err or "데이터 오류",
+        }
+
+    df = df.copy()
+    df[f"ma_{int(mid_window)}"] = df["close"].rolling(
+        window=int(mid_window), min_periods=int(mid_window)
+    ).mean()
+    inst_headline, inst_details = institutional_signal_summary(
+        df,
+        20,
+        60,
+        volume_filter=True,
+        atr_stop_mult=2.0,
+        atr_take_mult=3.0,
+    )
+    price_row, close_usd, prev_usd = last_valid_close_snapshot(df)
+    last = price_row if price_row is not None else df.iloc[-1]
+    ev = float(close_usd) * float(qty) if close_usd is not None else 0.0
+
+    px_txt = f"{float(close_usd):,.2f}" if close_usd is not None else "—"
+    day_pct: float | None = None
+    if close_usd is not None and prev_usd is not None and float(prev_usd) != 0:
+        day_pct = (float(close_usd) / float(prev_usd) - 1.0) * 100.0
+    chg_txt = f"{day_pct:+.2f}%" if day_pct is not None else "—"
+
+    term_html = institutional_terminal_html(
+        tkr,
+        last,
+        short_window=20,
+        mid_window=int(mid_window),
+        long_window=60,
+        rsi_window=14,
+        atr_window=14,
+        atr_stop_mult=2.0,
+        atr_take_mult=3.0,
+        inst_headline=inst_headline,
+        inst_details=inst_details,
+        day_change_pct=day_pct,
+    )
+    sig_bucket = signal_bucket_from_action_line(inst_details.get("action"))
+    sig_first_d, sig_first_px = first_sara_pala_signal_date_price(df, sig_bucket)
+
+    title = (
+        f"{tkr} · 평가 {ev:,.0f} USD · 종가 {px_txt} USD · 전일대비 {chg_txt} · 보유 {qty}주"
+    )
+
+    return {
+        "ok": True,
+        "tkr": tkr,
+        "qty": qty,
+        "title": title,
+        "term_html": term_html,
+        "sig_bucket": sig_bucket,
+        "sig_first_d": sig_first_d,
+        "sig_first_px": sig_first_px,
+    }
 
 
 def calculate_cross_signals(

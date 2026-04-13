@@ -1,6 +1,6 @@
 """모바일·브라우저 전용: 보유 포트폴리오 종목의 기관용 터미널 요약만 표시.
 
-`app.py` 포트폴리오와 동일하게 최근 미국 거래일 기준 **180일** 일봉·지표·신호최초일을 씁니다.
+보유 목록·정렬·분석은 PC `app.py`의 `build_portfolio_snapshot`과 동일합니다.
 배포(Streamlit Cloud 등) 시 엔트리로 `mobile_app.py`를 지정할 수 있습니다.
 
 로컬 실행: `streamlit run mobile_app.py`
@@ -12,6 +12,7 @@ import datetime as dt
 import html
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import streamlit as st
 
 
@@ -92,7 +93,7 @@ def main() -> None:
 
     st.title("📱 포트폴리오 · 기관 터미널")
     st.caption(
-        "PC 대시보드(`app.py`)와 같은 멀티팩터·이평·ATR 설정으로 보유 종목별 터미널만 보여 줍니다."
+        "PC 대시보드 「내 포트폴리오 요약」과 **동일 보유·동일 정렬·동일 분석**으로 터미널만 보여 줍니다."
     )
 
     # PC(`app.py`)가 저장하는 `portfolio_holdings.json`을 매 실행마다 읽음 — 세션에 묶이지 않음
@@ -105,112 +106,55 @@ def main() -> None:
         return
 
     end_d = _market_last_us_date()
-    # PC 포트폴리오(`_cached_portfolio_unit_analysis`)와 동일: 신호최초일·멀티팩터는 180일 구간
-    start_d = end_d - dt.timedelta(days=180)
+    st.caption(f"기준일(미국 최근 거래일): **{end_d}** · 평가금액 높은 순 = PC 스냅샷과 동일")
 
-    short_w, mid_w, long_w = 20, 50, 60
-    rsi_w, atr_w = 14, 14
-    bb_w, bb_k = 20, 2.0
-    atr_stop_m, atr_take_m = 2.0, 3.0
-    vol_f = True
-
-    st.caption(f"기간: {start_d} ~ {end_d} · 이평 {short_w}/{mid_w}/{long_w} · RSI {rsi_w} · ATR {atr_w}")
-    st.caption("표시 순서: **평가금액(종가×보유수량) 높은 순** (PC 포트폴리오 요약과 동일)")
+    with st.spinner("포트폴리오 종목 데이터를 불러오는 중…"):
+        snap = core.build_portfolio_snapshot(as_of=end_d, holdings=holdings)
+    if snap.empty:
+        st.info("포트폴리오 요약을 계산할 수 없습니다. 티커·데이터 소스를 확인해 주세요.")
+        return
 
     rows: list[dict] = []
-    with st.spinner("포트폴리오 종목 데이터를 불러오는 중…"):
-        for tkr, qty in sorted(holdings.items(), key=lambda x: x[0]):
-            df, err = core.load_price_data(tkr, start_d, end_d)
-            if df.empty:
+    with st.spinner("종목별 터미널을 구성하는 중…"):
+        for _, row in snap.iterrows():
+            tkr = str(row["티커"])
+            qty = int(row["보유수량"])
+            v_eval = row["평가금액(USD)"]
+            if v_eval == "" or pd.isna(v_eval):
                 rows.append(
                     {
                         "ok": False,
                         "tkr": tkr,
                         "qty": qty,
-                        "err": err or "일봉 데이터를 가져오지 못했습니다.",
-                        "eval_usd": 0.0,
+                        "err": str(row.get("한줄 의사결정") or "일봉 데이터를 가져오지 못했습니다."),
                     }
                 )
                 continue
 
-            df = core.trim_df_to_last_valid_close(df)
-            if df.empty:
+            block = core.mobile_portfolio_expander_content(tkr, qty, end_d)
+            if not block.get("ok"):
                 rows.append(
                     {
                         "ok": False,
                         "tkr": tkr,
                         "qty": qty,
-                        "err": "유효한 종가가 없습니다.",
-                        "eval_usd": 0.0,
+                        "err": str(block.get("err") or "분석 실패"),
                     }
                 )
                 continue
-
-            df = core.calculate_cross_signals(df, short_w, long_w)
-            df[f"ma_{int(mid_w)}"] = df["close"].rolling(
-                window=int(mid_w), min_periods=int(mid_w)
-            ).mean()
-            df = core.add_institutional_indicators(
-                df,
-                rsi_window=int(rsi_w),
-                atr_window=int(atr_w),
-                bb_window=int(bb_w),
-                bb_k=float(bb_k),
-            )
-            inst_headline, inst_details = core.institutional_signal_summary(
-                df,
-                short_window=short_w,
-                long_window=long_w,
-                volume_filter=vol_f,
-                atr_stop_mult=atr_stop_m,
-                atr_take_mult=atr_take_m,
-            )
-            price_row, close_usd, prev_usd = core.last_valid_close_snapshot(df)
-            last = price_row if price_row is not None else df.iloc[-1]
-            ev = float(close_usd) * float(qty) if close_usd is not None else 0.0
-
-            px_txt = f"{float(close_usd):,.2f}" if close_usd is not None else "—"
-            day_pct: float | None = None
-            if close_usd is not None and prev_usd is not None and float(prev_usd) != 0:
-                day_pct = (float(close_usd) / float(prev_usd) - 1.0) * 100.0
-            chg_txt = f"{day_pct:+.2f}%" if day_pct is not None else "—"
-
-            term_html = core.institutional_terminal_html(
-                tkr,
-                last,
-                short_window=int(short_w),
-                mid_window=int(mid_w),
-                long_window=int(long_w),
-                rsi_window=int(rsi_w),
-                atr_window=int(atr_w),
-                atr_stop_mult=float(atr_stop_m),
-                atr_take_mult=float(atr_take_m),
-                inst_headline=inst_headline,
-                inst_details=inst_details,
-                day_change_pct=day_pct,
-            )
-            sig_bucket = core.signal_bucket_from_action_line(inst_details.get("action"))
-            sig_first_d, sig_first_px = core.first_sara_pala_signal_date_price(df, sig_bucket)
-
-            title = (
-                f"{tkr} · 평가 {ev:,.0f} USD · 종가 {px_txt} USD · 전일대비 {chg_txt} · 보유 {qty}주"
-            )
 
             rows.append(
                 {
                     "ok": True,
-                    "tkr": tkr,
-                    "qty": qty,
-                    "eval_usd": ev,
-                    "title": title,
-                    "term_html": term_html,
-                    "sig_bucket": sig_bucket,
-                    "sig_first_d": sig_first_d,
-                    "sig_first_px": sig_first_px,
+                    "tkr": block["tkr"],
+                    "qty": block["qty"],
+                    "title": block["title"],
+                    "term_html": block["term_html"],
+                    "sig_bucket": block["sig_bucket"],
+                    "sig_first_d": block["sig_first_d"],
+                    "sig_first_px": block["sig_first_px"],
                 }
             )
-
-    rows.sort(key=lambda r: (not r["ok"], -(r["eval_usd"] if r["ok"] else 0.0), r["tkr"]))
 
     for i, r in enumerate(rows):
         if not r["ok"]:
