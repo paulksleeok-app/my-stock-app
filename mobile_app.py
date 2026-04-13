@@ -114,21 +114,35 @@ def main() -> None:
     vol_f = True
 
     st.caption(f"기간: {start_d} ~ {end_d} · 이평 {short_w}/{mid_w}/{long_w} · RSI {rsi_w} · ATR {atr_w}")
+    st.caption("표시 순서: **평가금액(종가×보유수량) 높은 순** (PC 포트폴리오 요약과 동일)")
 
+    rows: list[dict] = []
     with st.spinner("포트폴리오 종목 데이터를 불러오는 중…"):
-        items = sorted(holdings.items(), key=lambda x: x[0])
-        for i, (tkr, qty) in enumerate(items):
+        for tkr, qty in sorted(holdings.items(), key=lambda x: x[0]):
             df, err = core.load_price_data(tkr, start_d, end_d)
-            title = f"{tkr} · 보유 {qty}주"
             if df.empty:
-                with st.expander(title, expanded=(i == 0)):
-                    st.warning(err or "일봉 데이터를 가져오지 못했습니다.")
+                rows.append(
+                    {
+                        "ok": False,
+                        "tkr": tkr,
+                        "qty": qty,
+                        "err": err or "일봉 데이터를 가져오지 못했습니다.",
+                        "eval_usd": 0.0,
+                    }
+                )
                 continue
 
             df = core.trim_df_to_last_valid_close(df)
             if df.empty:
-                with st.expander(title, expanded=(i == 0)):
-                    st.warning("유효한 종가가 없습니다.")
+                rows.append(
+                    {
+                        "ok": False,
+                        "tkr": tkr,
+                        "qty": qty,
+                        "err": "유효한 종가가 없습니다.",
+                        "eval_usd": 0.0,
+                    }
+                )
                 continue
 
             df = core.calculate_cross_signals(df, short_w, long_w)
@@ -152,12 +166,13 @@ def main() -> None:
             )
             price_row, close_usd, prev_usd = core.last_valid_close_snapshot(df)
             last = price_row if price_row is not None else df.iloc[-1]
+            ev = float(close_usd) * float(qty) if close_usd is not None else 0.0
+
             px_txt = f"{float(close_usd):,.2f}" if close_usd is not None else "—"
             day_pct: float | None = None
             if close_usd is not None and prev_usd is not None and float(prev_usd) != 0:
                 day_pct = (float(close_usd) / float(prev_usd) - 1.0) * 100.0
             chg_txt = f"{day_pct:+.2f}%" if day_pct is not None else "—"
-            title = f"{tkr} · 종가 {px_txt} USD · 전일대비 {chg_txt} · 보유 {qty}주"
 
             term_html = core.institutional_terminal_html(
                 tkr,
@@ -176,17 +191,44 @@ def main() -> None:
             sig_bucket = core.signal_bucket_from_action_line(inst_details.get("action"))
             sig_first_d, sig_first_px = core.first_sara_pala_signal_date_price(df, sig_bucket)
 
+            title = (
+                f"{tkr} · 평가 {ev:,.0f} USD · 종가 {px_txt} USD · 전일대비 {chg_txt} · 보유 {qty}주"
+            )
+
+            rows.append(
+                {
+                    "ok": True,
+                    "tkr": tkr,
+                    "qty": qty,
+                    "eval_usd": ev,
+                    "title": title,
+                    "term_html": term_html,
+                    "sig_bucket": sig_bucket,
+                    "sig_first_d": sig_first_d,
+                    "sig_first_px": sig_first_px,
+                }
+            )
+
+    rows.sort(key=lambda r: (not r["ok"], -(r["eval_usd"] if r["ok"] else 0.0), r["tkr"]))
+
+    for i, r in enumerate(rows):
+        if not r["ok"]:
+            title = f"{r['tkr']} · 보유 {r['qty']}주"
             with st.expander(title, expanded=(i == 0)):
-                if sig_bucket in ("사라", "팔라"):
-                    d_s = html.escape(sig_first_d) if sig_first_d else "—"
-                    p_s = html.escape(sig_first_px) if sig_first_px else "—"
-                    b_s = html.escape(sig_bucket)
-                    st.markdown(
-                        f'<p class="sig-first-hint">«{b_s}» 신호최초일: <strong>{d_s}</strong> · '
-                        f'신호당시종가(USD): <strong>{p_s}</strong></p>',
-                        unsafe_allow_html=True,
-                    )
-                st.markdown(term_html, unsafe_allow_html=True)
+                st.warning(r["err"])
+            continue
+
+        with st.expander(r["title"], expanded=(i == 0)):
+            if r["sig_bucket"] in ("사라", "팔라"):
+                d_s = html.escape(r["sig_first_d"]) if r["sig_first_d"] else "—"
+                p_s = html.escape(r["sig_first_px"]) if r["sig_first_px"] else "—"
+                b_s = html.escape(r["sig_bucket"])
+                st.markdown(
+                    f'<p class="sig-first-hint">«{b_s}» 신호최초일: <strong>{d_s}</strong> · '
+                    f'신호당시종가(USD): <strong>{p_s}</strong></p>',
+                    unsafe_allow_html=True,
+                )
+            st.markdown(r["term_html"], unsafe_allow_html=True)
 
 
 main()
