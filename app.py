@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import threading
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1109,8 +1110,39 @@ DEFAULT_PORTFOLIO_HOLDINGS: dict[str, int] = {
 }
 
 
-def _portfolio_holdings_path() -> Path:
+def portfolio_holdings_json_path() -> Path:
+    """보유 목록 JSON 경로.
+
+    환경 변수 ``STOCK_APP_PORTFOLIO_JSON``이 있으면 그 경로를 사용합니다.
+    PC(`streamlit run app.py`)와 모바일(`streamlit run mobile_app.py`)이 **같은 파일**을
+    가리키면 종목 수가 일치합니다(예: 공용 경로·동기화 폴더).
+    """
+    env = (os.environ.get("STOCK_APP_PORTFOLIO_JSON") or "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
     return Path(__file__).resolve().parent / "portfolio_holdings.json"
+
+
+def _portfolio_holdings_fingerprint() -> str:
+    """파일이 바뀌면 포트폴리오 스냅샷 캐시가 낡은 종목 목록을 쓰지 않도록 구분."""
+    path = portfolio_holdings_json_path()
+    try:
+        if path.is_file():
+            fi = path.stat()
+            return f"{fi.st_mtime_ns}:{fi.st_size}"
+    except OSError:
+        pass
+    return "missing"
+
+
+def us_market_last_trading_date() -> dt.date:
+    """미국 동부 기준 최근 거래일(PC 사이드바 종료일 기본과 동일한 주말 보정)."""
+    now_kst = dt.datetime.now(ZoneInfo("Asia/Seoul"))
+    now_us = now_kst.astimezone(ZoneInfo("America/New_York")).date()
+    if now_us.weekday() >= 5:
+        days_back = now_us.weekday() - 4
+        return now_us - dt.timedelta(days=days_back)
+    return now_us
 
 
 def normalize_portfolio_ticker(raw: str) -> str:
@@ -1126,7 +1158,7 @@ def normalize_portfolio_ticker(raw: str) -> str:
 
 def load_portfolio_holdings() -> dict[str, int]:
     """로컬 JSON에서 보유 목록 로드. 없거나 오류 시 기본값."""
-    path = _portfolio_holdings_path()
+    path = portfolio_holdings_json_path()
     if not path.is_file():
         return dict(DEFAULT_PORTFOLIO_HOLDINGS)
     try:
@@ -1167,7 +1199,7 @@ def save_portfolio_holdings(holdings: dict[str, int]) -> None:
         if q < 0:
             continue
         clean[t] = q
-    path = _portfolio_holdings_path()
+    path = portfolio_holdings_json_path()
     path.write_text(
         json.dumps(dict(sorted(clean.items())), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -1294,11 +1326,21 @@ def _portfolio_row_for_ticker(tkr: str, qty: int, as_of: dt.date) -> dict:
 
 
 def _holdings_cache_key(holdings: dict[str, int]) -> str:
-    return json.dumps(sorted(holdings.items()), ensure_ascii=False)
+    return json.dumps(
+        {
+            "pairs": sorted(holdings.items()),
+            "fp": _portfolio_holdings_fingerprint(),
+        },
+        ensure_ascii=False,
+    )
 
 
 def _holdings_from_cache_key(holdings_key: str) -> dict[str, int]:
-    pairs = json.loads(holdings_key)
+    data = json.loads(holdings_key)
+    if isinstance(data, list):
+        pairs = data
+    else:
+        pairs = data.get("pairs") or []
     return {str(k): int(v) for k, v in pairs}
 
 
@@ -2113,7 +2155,10 @@ div[data-testid="stVerticalBlock"] > div {{
         portfolio_holdings: dict[str, int] = st.session_state.portfolio_holdings
 
         with st.expander("나의 포트폴리오 편집", expanded=False):
-            st.caption("추가·삭제 시 `portfolio_holdings.json`에 저장됩니다.")
+            st.caption(
+                f"추가·삭제 시 아래 경로에 저장됩니다. 모바일과 종목 수를 맞추려면 **동일 JSON**을 써 주세요.\n"
+                f"`{portfolio_holdings_json_path()}` · **{len(portfolio_holdings)}**종목"
+            )
             if portfolio_holdings:
                 st.dataframe(
                     pd.DataFrame(
