@@ -1600,6 +1600,18 @@ def _macd_state_line(last: pd.Series) -> tuple[str, str]:
     return cross, f"MACD {mf:.4f} / Sig {sf:.4f}"
 
 
+def _day_change_pct_html(pct: float | None) -> str:
+    """전일 종가 대비 등락률(%) HTML 조각."""
+    if pct is None:
+        return '<span class="qt-muted">—</span>'
+    try:
+        v = float(pct)
+    except (TypeError, ValueError):
+        return '<span class="qt-muted">—</span>'
+    cls = "qt-ok" if v > 0 else ("qt-warn" if v < 0 else "qt-muted")
+    return f'<span class="{cls}">{v:+.2f}%</span>'
+
+
 def institutional_terminal_html(
     ticker: str,
     last: pd.Series,
@@ -1613,6 +1625,7 @@ def institutional_terminal_html(
     atr_take_mult: float,
     inst_headline: str,
     inst_details: dict,
+    day_change_pct: float | None = None,
 ) -> str:
     """기관용 터미널: 단기·중기·장기 + MACD + ATR 리스크."""
     fac = inst_details.get("factors") or {}
@@ -1697,9 +1710,10 @@ def institutional_terminal_html(
 <div class="qt-row"><span class="qt-k">MA {long_window}</span> <span class="qt-v">{_price_vs_ma_text(close, ma_l)}</span></div>
 <div class="qt-row"><span class="qt-k">일목 구름</span> <span class="qt-v">{_cloud_position_text(last)}</span></div>"""
 
+    chg_cell = _day_change_pct_html(day_change_pct)
     head = f"""<div class="quant-terminal">
 <div class="qt-row"><span class="qt-k">티커</span> <span class="qt-v">{ticker.upper()}</span></div>
-<div class="qt-row"><span class="qt-k">종가(USD)</span> <span class="qt-v">{close_txt}</span> <span class="qt-muted">(최근 확정 종가)</span></div>
+<div class="qt-row"><span class="qt-k">종가(USD)</span> <span class="qt-v">{close_txt}</span> <span class="qt-muted">· 전일대비</span> {chg_cell} <span class="qt-muted">(최근 확정)</span></div>
 <div class="qt-row"><span class="qt-k">멀티팩터</span> <span class="qt-v">{comp}</span> <span class="qt-muted">(0~100)</span></div>
 <div class="qt-row"><span class="qt-k">종합 판단</span> <span class="qt-ok">{inst_headline}</span></div>
 <div class="qt-row"><span class="qt-k">한줄 의사결정</span> <span class="qt-v">{inst_details.get("action", "관망")}</span></div>
@@ -2228,7 +2242,7 @@ div[data-testid="stVerticalBlock"] > div {{
         st.write(cross_proj_detail)
 
     # 분석 티커 가격 요약 (현재가/1/2/3/5/2주(10거래일) 예상) — 회귀 1회
-    price_terminal_row, last_close_num, _ = last_valid_close_snapshot(df)
+    price_terminal_row, last_close_num, prev_close_num = last_valid_close_snapshot(df)
     last_close = pd.NA if last_close_num is None else float(last_close_num)
     _mh = multi_horizon_price_labels(df, (1, 2, 3, 5, 10))
     proj1_label = _mh.get(1, "예측 불가")
@@ -2267,6 +2281,9 @@ div[data-testid="stVerticalBlock"] > div {{
 
     st.subheader("기관용 터미널 — 단기 · 중기 · 장기 · MACD · ATR")
     last = price_terminal_row if price_terminal_row is not None else df.iloc[-1]
+    term_day_pct: float | None = None
+    if last_close_num is not None and prev_close_num is not None and float(prev_close_num) != 0:
+        term_day_pct = (float(last_close_num) / float(prev_close_num) - 1.0) * 100.0
     term_html = institutional_terminal_html(
         ticker,
         last,
@@ -2279,6 +2296,7 @@ div[data-testid="stVerticalBlock"] > div {{
         atr_take_mult=float(atr_take_mult),
         inst_headline=inst_headline,
         inst_details=inst_details,
+        day_change_pct=term_day_pct,
     )
     st.markdown(term_html, unsafe_allow_html=True)
 

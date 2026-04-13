@@ -150,10 +150,14 @@ def main() -> None:
                 atr_stop_mult=atr_stop_m,
                 atr_take_mult=atr_take_m,
             )
-            price_row, close_usd, _ = core.last_valid_close_snapshot(df)
+            price_row, close_usd, prev_usd = core.last_valid_close_snapshot(df)
             last = price_row if price_row is not None else df.iloc[-1]
             px_txt = f"{float(close_usd):,.2f}" if close_usd is not None else "—"
-            title = f"{tkr} · 종가 {px_txt} USD · 보유 {qty}주"
+            day_pct: float | None = None
+            if close_usd is not None and prev_usd is not None and float(prev_usd) != 0:
+                day_pct = (float(close_usd) / float(prev_usd) - 1.0) * 100.0
+            chg_txt = f"{day_pct:+.2f}%" if day_pct is not None else "—"
+            title = f"{tkr} · 종가 {px_txt} USD · 전일대비 {chg_txt} · 보유 {qty}주"
 
             term_html = core.institutional_terminal_html(
                 tkr,
@@ -167,6 +171,7 @@ def main() -> None:
                 atr_take_mult=float(atr_take_m),
                 inst_headline=inst_headline,
                 inst_details=inst_details,
+                day_change_pct=day_pct,
             )
             sig_bucket = core.signal_bucket_from_action_line(inst_details.get("action"))
             sig_first_d, sig_first_px = core.first_sara_pala_signal_date_price(df, sig_bucket)
