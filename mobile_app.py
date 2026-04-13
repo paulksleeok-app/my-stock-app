@@ -8,21 +8,10 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import html
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
-
-
-def _market_last_us_date() -> dt.date:
-    now_kst = dt.datetime.now(ZoneInfo("Asia/Seoul"))
-    now_us = now_kst.astimezone(ZoneInfo("America/New_York")).date()
-    if now_us.weekday() >= 5:
-        days_back = now_us.weekday() - 4
-        return now_us - dt.timedelta(days=days_back)
-    return now_us
 
 
 def main() -> None:
@@ -105,8 +94,12 @@ def main() -> None:
         )
         return
 
-    end_d = _market_last_us_date()
-    st.caption(f"기준일(미국 최근 거래일): **{end_d}** · 보유 = PC와 동일 · 평가금액 높은 순")
+    end_d = core.us_market_last_trading_date()
+    pj = core.portfolio_holdings_json_path()
+    st.caption(
+        f"기준일(미국 최근 거래일): **{end_d}** · 보유 **{len(holdings)}**종목 · "
+        f"평가금액 높은 순 · JSON: `{pj}`"
+    )
 
     with st.spinner("포트폴리오 종목 데이터를 불러오는 중…"):
         snap = core.build_portfolio_snapshot(as_of=end_d, holdings=holdings)
