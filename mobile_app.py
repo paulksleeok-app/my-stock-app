@@ -150,8 +150,10 @@ def main() -> None:
                 atr_stop_mult=atr_stop_m,
                 atr_take_mult=atr_take_m,
             )
-            price_row, _, _ = core.last_valid_close_snapshot(df)
+            price_row, close_usd, _ = core.last_valid_close_snapshot(df)
             last = price_row if price_row is not None else df.iloc[-1]
+            px_txt = f"{float(close_usd):,.2f}" if close_usd is not None else "—"
+            title = f"{tkr} · 종가 {px_txt} USD · 보유 {qty}주"
 
             term_html = core.institutional_terminal_html(
                 tkr,

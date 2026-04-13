@@ -1628,6 +1628,7 @@ def institutional_terminal_html(
     long_col = f"ma_{long_window}"
 
     close = float(last["close"]) if pd.notna(last.get("close")) else float("nan")
+    close_txt = "—" if pd.isna(last.get("close")) else f"{float(last['close']):,.2f}"
     ma_s = last.get(short_col)
     ma_m = last.get(mid_col)
     ma_l = last.get(long_col)
@@ -1698,6 +1699,7 @@ def institutional_terminal_html(
 
     head = f"""<div class="quant-terminal">
 <div class="qt-row"><span class="qt-k">티커</span> <span class="qt-v">{ticker.upper()}</span></div>
+<div class="qt-row"><span class="qt-k">종가(USD)</span> <span class="qt-v">{close_txt}</span> <span class="qt-muted">(최근 확정 종가)</span></div>
 <div class="qt-row"><span class="qt-k">멀티팩터</span> <span class="qt-v">{comp}</span> <span class="qt-muted">(0~100)</span></div>
 <div class="qt-row"><span class="qt-k">종합 판단</span> <span class="qt-ok">{inst_headline}</span></div>
 <div class="qt-row"><span class="qt-k">한줄 의사결정</span> <span class="qt-v">{inst_details.get("action", "관망")}</span></div>
