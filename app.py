@@ -1148,6 +1148,11 @@ def load_portfolio_holdings() -> dict[str, int]:
         return dict(DEFAULT_PORTFOLIO_HOLDINGS)
 
 
+def pc_portfolio_holdings() -> dict[str, int]:
+    """PC 대시보드 사이드바가 쓰는 보유 종목·수량과 동일(`portfolio_holdings.json` 규칙). 모바일은 이것만 사용."""
+    return load_portfolio_holdings()
+
+
 def save_portfolio_holdings(holdings: dict[str, int]) -> None:
     """보유 목록을 앱 폴더의 portfolio_holdings.json 에 저장."""
     clean: dict[str, int] = {}
@@ -1335,7 +1340,7 @@ def build_portfolio_snapshot(
     holdings: dict[str, int] | None = None,
 ) -> pd.DataFrame:
     """보유 종목 기준 요약(티커별 네트워크 병렬). 실패 종목도 행으로 남겨 전체 보유가 보이게 함."""
-    h = holdings if holdings is not None else load_portfolio_holdings()
+    h = holdings if holdings is not None else pc_portfolio_holdings()
     return _cached_portfolio_snapshot_df(as_of.isoformat(), _holdings_cache_key(h))
 
 
@@ -2104,7 +2109,7 @@ div[data-testid="stVerticalBlock"] > div {{
         st.header("설정")
 
         # 매 렌더마다 JSON을 읽어 PC·외부 편집·모바일 앱과 단일 소스(`portfolio_holdings.json`) 유지
-        st.session_state.portfolio_holdings = load_portfolio_holdings()
+        st.session_state.portfolio_holdings = pc_portfolio_holdings()
         portfolio_holdings: dict[str, int] = st.session_state.portfolio_holdings
 
         with st.expander("나의 포트폴리오 편집", expanded=False):

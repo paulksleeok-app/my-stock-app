@@ -96,8 +96,8 @@ def main() -> None:
         "PC 대시보드 「내 포트폴리오 요약」과 **동일 보유·동일 정렬·동일 분석**으로 터미널만 보여 줍니다."
     )
 
-    # PC(`app.py`)가 저장하는 `portfolio_holdings.json`을 매 실행마다 읽음 — 세션에 묶이지 않음
-    holdings = core.load_portfolio_holdings()
+    # 종목·수량은 PC 대시보드와 동일 소스만 사용 (별도 목록 없음)
+    holdings = core.pc_portfolio_holdings()
     if not holdings:
         st.info(
             "보유 종목이 없습니다. PC 앱에서 포트폴리오를 편집하거나, "
@@ -106,7 +106,7 @@ def main() -> None:
         return
 
     end_d = _market_last_us_date()
-    st.caption(f"기준일(미국 최근 거래일): **{end_d}** · 평가금액 높은 순 = PC 스냅샷과 동일")
+    st.caption(f"기준일(미국 최근 거래일): **{end_d}** · 보유 = PC와 동일 · 평가금액 높은 순")
 
     with st.spinner("포트폴리오 종목 데이터를 불러오는 중…"):
         snap = core.build_portfolio_snapshot(as_of=end_d, holdings=holdings)
