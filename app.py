@@ -2022,8 +2022,8 @@ div[data-testid="stVerticalBlock"] > div {{
     with st.sidebar:
         st.header("설정")
 
-        if "portfolio_holdings" not in st.session_state:
-            st.session_state.portfolio_holdings = load_portfolio_holdings()
+        # 매 렌더마다 JSON을 읽어 PC·외부 편집·모바일 앱과 단일 소스(`portfolio_holdings.json`) 유지
+        st.session_state.portfolio_holdings = load_portfolio_holdings()
         portfolio_holdings: dict[str, int] = st.session_state.portfolio_holdings
 
         with st.expander("나의 포트폴리오 편집", expanded=False):

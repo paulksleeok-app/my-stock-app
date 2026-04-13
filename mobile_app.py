@@ -95,6 +95,7 @@ def main() -> None:
         "PC 대시보드(`app.py`)와 같은 멀티팩터·이평·ATR 설정으로 보유 종목별 터미널만 보여 줍니다."
     )
 
+    # PC(`app.py`)가 저장하는 `portfolio_holdings.json`을 매 실행마다 읽음 — 세션에 묶이지 않음
     holdings = core.load_portfolio_holdings()
     if not holdings:
         st.info(
