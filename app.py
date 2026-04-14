@@ -420,6 +420,36 @@ def multi_horizon_price_labels(
     return out
 
 
+def mobile_multi_horizon_price_html(
+    current_price_txt: str,
+    mh: dict[int, str],
+) -> str:
+    """PC 단일 종목 `가격 요약`과 동일 출처(`multi_horizon_price_labels`)를 터미널 스타일 HTML로."""
+    import html as html_mod
+
+    esc = html_mod.escape
+    lines = [
+        '<div class="quant-terminal">',
+        '<div class="qt-section">가격 요약 (참고용)</div>',
+        f'<div class="qt-row"><span class="qt-k">현재가격(USD)</span> '
+        f'<span class="qt-v">{esc(current_price_txt)}</span></div>',
+    ]
+    for h, title in (
+        (1, "1거래일 후 예상"),
+        (2, "2거래일 후 예상"),
+        (3, "3거래일 후 예상"),
+        (5, "5거래일 후 예상"),
+        (10, "2주 후 예상(10거래일)"),
+    ):
+        lab = esc(str(mh.get(h, "예측 불가")))
+        lines.append(
+            f'<div class="qt-row"><span class="qt-k">{esc(title)}</span> '
+            f'<span class="qt-v">{lab}</span></div>'
+        )
+    lines.append("</div>")
+    return "\n".join(lines)
+
+
 def _log_price_forecast_weighted_atr(
     df: pd.DataFrame,
     days_ahead: int,
@@ -1425,7 +1455,9 @@ def mobile_portfolio_expander_content(
         day_pct = (float(close_usd) / float(prev_usd) - 1.0) * 100.0
     chg_txt = f"{day_pct:+.2f}%" if day_pct is not None else "—"
 
-    term_html = institutional_terminal_html(
+    _mh = multi_horizon_price_labels(df, (1, 2, 3, 5, 10))
+    price_summary_html = mobile_multi_horizon_price_html(px_txt, _mh)
+    term_html = price_summary_html + institutional_terminal_html(
         tkr,
         last,
         short_window=20,
