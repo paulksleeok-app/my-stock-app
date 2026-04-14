@@ -1129,7 +1129,7 @@ def first_sara_pala_signal_date_price(
 # 사용자 보유 포트폴리오: 최초·파일 없을 때 기본값 (실제 목록은 portfolio_holdings.json)
 DEFAULT_PORTFOLIO_HOLDINGS: dict[str, int] = {
     "ARKB": 11151,
-    "CRM": 50,
+    "CNQ": 0,
     "VST": 25,
     "AVGO": 66,
     "IONQ": 600,
